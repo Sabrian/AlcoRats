@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>AlcoRats</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="AlcoRats.Android\**" />
+    <Compile Remove="AlcoRats.Desktop\**" />
+    <Compile Remove="AlcoRats.iOS\**" />
+    <Compile Remove=".tools\**" />
+    <None Remove="AlcoRats.Android\**" />
+    <None Remove="AlcoRats.Desktop\**" />
+    <None Remove="AlcoRats.iOS\**" />
+    <None Remove=".tools\**" />
+    <EmbeddedResource Remove="AlcoRats.Android\**" />
+    <EmbeddedResource Remove="AlcoRats.Desktop\**" />
+    <EmbeddedResource Remove="AlcoRats.iOS\**" />
+    <AvaloniaXaml Remove="AlcoRats.Android\**" />
+    <AvaloniaXaml Remove="AlcoRats.Desktop\**" />
+    <AvaloniaXaml Remove="AlcoRats.iOS\**" />
+    <AvaloniaResource Remove="AlcoRats.Android\**" />
+    <AvaloniaResource Remove="AlcoRats.Desktop\**" />
+    <AvaloniaResource Remove="AlcoRats.iOS\**" />
+    <Content Remove="AlcoRats.Android\**" />
+    <Content Remove="AlcoRats.Desktop\**" />
+    <Content Remove="AlcoRats.iOS\**" />
+    <Content Remove=".tools\**" />
+
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="Avalonia.Fonts.Inter" />
+    <PackageReference Include="Avalonia.Controls.WebView" />
+    <PackageReference Include="AvaloniaUI.DiagnosticsSupport">
+      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
+      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,6 @@
+/.tools/
+/.vs/
+*/bin/*
+*/obj/*
+bin/
+obj/

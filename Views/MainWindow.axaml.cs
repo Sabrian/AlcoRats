@@ -8,4 +8,10 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
     }
+
+    public void SetMainView(MainView mainView)
+    {
+        RootHost.Children.Clear();
+        RootHost.Children.Add(mainView);
+    }
 }

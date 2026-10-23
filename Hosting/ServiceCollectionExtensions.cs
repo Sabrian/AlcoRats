@@ -1,3 +1,4 @@
+using AlcoRats.Mapping;
 using AlcoRats.Services;
 using AlcoRats.Services.Speech;
 using AlcoRats.Settings;
@@ -10,6 +11,7 @@ public static class ServiceCollectionExtensions
 {
     public static IServiceCollection AddAlcoRatsCore(this IServiceCollection services)
     {
+        services.AddAutoMapper(cfg => cfg.AddProfile<MappingProfile>());
         services.AddSingleton<AppSettings>();
         services.AddSingleton<IConferenceSession, ConferenceSession>();
         services.AddSingleton<IAudioPlayer, PlatformAudioPlayer>();

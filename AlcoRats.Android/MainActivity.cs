@@ -23,7 +23,9 @@ namespace AlcoRats.Android;
     MainLauncher = true,
     ScreenOrientation = ScreenOrientation.Portrait,
     ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.UiMode,
-    LaunchMode = LaunchMode.SingleTop)]
+    LaunchMode = LaunchMode.SingleTop,
+    // Let Avalonia TextBox receive IME (incl. Russian) instead of the embedded WebView.
+    WindowSoftInputMode = SoftInput.AdjustResize)]
 public class MainActivity : AvaloniaMainActivity
 {
     private const int MediaPermissionRequestCode = 1001;

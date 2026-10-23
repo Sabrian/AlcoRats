@@ -1,0 +1,79 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:AlcoRats.ViewModels"
+             xmlns:materialIcons="clr-namespace:Material.Icons.Avalonia;assembly=Material.Icons.Avalonia"
+             mc:Ignorable="d"
+             d:DesignWidth="390"
+             d:DesignHeight="844"
+             x:Class="AlcoRats.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel"
+             Background="{DynamicResource AppSurfaceBrush}">
+
+    <Design.DataContext>
+        <vm:SettingsViewModel />
+    </Design.DataContext>
+
+    <DockPanel DataContext="{Binding Settings}"	Margin="16">
+        <Button x:Name="BackButton"
+                DockPanel.Dock="Bottom"
+                HorizontalAlignment="Right"
+                Height="48"
+                Margin="0,16,0,0"
+                Click="OnBackClick">
+            <StackPanel Orientation="Horizontal"
+                        Spacing="8"
+                        HorizontalAlignment="Center">
+                <TextBlock Text="Назад"
+                           VerticalAlignment="Center"/>
+                <materialIcons:MaterialIcon Kind="ArrowRight"
+                                            Width="20"
+                                            Height="20" />
+            </StackPanel>
+        </Button>
+
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="16">
+                <TextBlock Text="Настройки"
+                           FontSize="22"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource StatusBarForegroundBrush}"
+                           Margin="0,8,0,8" />
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Пользователь"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                    <TextBox Text="{Binding User}"
+                             PlaceholderText="Имя в конференции" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Пароль"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                    <TextBox Text="{Binding Password}"
+                             PasswordChar="•"
+                             PlaceholderText="Пароль" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Вход пользователя"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                    <TextBox Text="{Binding UserEnter}"
+                             PlaceholderText="{}{User}, входит" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Выход пользователя"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                    <TextBox Text="{Binding UserLeave}"
+                             PlaceholderText="{}{User}, выходит" />
+                </StackPanel>
+
+                <CheckBox IsChecked="{Binding ToolbarAlwaysVisible}"
+                          Content="Закрепить нижнюю панель Jitsi" />
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</UserControl>

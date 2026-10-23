@@ -1,6 +1,9 @@
 using System;
 using System.IO;
+using AlcoRats.Mapping;
 using AlcoRats.Services.Speech;
+using AlcoRats.Settings;
+using AutoMapper;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog;
@@ -62,6 +65,8 @@ public static class AppHost
         });
 
         GlobalExceptionHandler.Install(_services.GetRequiredService<ILogger<GlobalExceptionHandler>>());
+        MapperConfig.Initialize(_services.GetRequiredService<IMapper>());
+        _services.GetRequiredService<AppSettings>().Load();
 
         var logger = _services.GetRequiredService<ILoggerFactory>().CreateLogger("AppHost");
         logger.LogInformation("AlcoRats host initialized. Log directory: {LogDirectory}", logDirectory);

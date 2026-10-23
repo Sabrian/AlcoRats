@@ -3,11 +3,16 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
 using AlcoRats.Hosting;
+using AlcoRats.Mapping;
 using AlcoRats.Services;
+using AlcoRats.Settings;
 using AlcoRats.ViewModels;
 using Avalonia;
+using Avalonia.Animation;
+using Avalonia.Animation.Easings;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Media;
 using Avalonia.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -22,10 +27,14 @@ public partial class MainView : UserControl
     private readonly Func<Task> _leaveHandler;
     private readonly ILogger<MainView> _logger;
     private readonly IConferenceSession _conference;
+    private readonly AppSettings _settings;
     private bool _pageReady;
     private bool _navigationStarted;
     private bool _bridgeInstalled;
     private bool _conferenceActive;
+    private bool _settingsOpen;
+    private bool _settingsAnimating;
+    private readonly TranslateTransform _settingsTransform = new();
 
     private const string ToggleMicScript = """
         (function () {
@@ -265,19 +274,11 @@ public partial class MainView : UserControl
         })()
         """;
 
-    public MainView()
+    public MainView(IConferenceSession conference, AppSettings settings, ILogger<MainView> logger): this()
     {
-        InitializeComponent();
-        if (AppHost.IsInitialized)
-        {
-            _logger = AppHost.Services.GetRequiredService<ILogger<MainView>>();
-            _conference = AppHost.Services.GetRequiredService<IConferenceSession>();
-        }
-        else
-        {
-            _logger = NullLogger<MainView>.Instance;
-            _conference = null!;
-        }
+        _conference = conference;
+        _settings = settings;
+        _logger = logger;
 
         _toggleMicrophoneHandler = () => RunScriptAsync(ToggleMicScript);
         _toggleCameraHandler = () => RunScriptAsync(ToggleCamScript);
@@ -291,6 +292,12 @@ public partial class MainView : UserControl
         DetachedFromVisualTree += OnDetachedFromVisualTree;
         WebViewPlatformSetup.Apply(RoomWebView);
         _logger.LogDebug("MainView created");
+    }
+
+    public MainView()
+    {
+        InitializeComponent();
+        SettingsOverlay.RenderTransform = _settingsTransform;
     }
 
     private void OnAdapterCreated(object? sender, EventArgs e)
@@ -321,11 +328,8 @@ public partial class MainView : UserControl
         void Apply()
         {
             _conferenceActive = active;
-            HomeIcon.IsVisible = !active;
-            HangupIcon.IsVisible = active;
-            ConferenceActionButton.SetValue(
-                ToolTip.TipProperty,
-                active ? "Покинуть конференцию" : "На страницу подключения");
+            // Hang up is done from Jitsi toolbar; status bar only offers "home" when idle.
+            ConferenceActionButton.IsVisible = !active;
         }
 
         if (Dispatcher.UIThread.CheckAccess())
@@ -334,20 +338,12 @@ public partial class MainView : UserControl
             Dispatcher.UIThread.Post(Apply);
     }
 
-    private async void OnConferenceActionClick(object? sender, RoutedEventArgs e)
+    private void OnConferenceActionClick(object? sender, RoutedEventArgs e)
     {
         try
         {
             if (_conferenceActive)
-            {
-                // Optimistic UI — bridge will confirm after hangup.
-                _logger.LogInformation("Leave conference requested from UI");
-                UpdateConferenceActionButton(false);
-                _conference.Publish(ConferenceSessionState.Inactive);
-                SetStatus("Выход из конференции…");
-                await _conference.LeaveAsync();
                 return;
-            }
 
             NavigateToRoomHome();
         }
@@ -358,9 +354,134 @@ public partial class MainView : UserControl
         }
     }
 
+    private async void OnSettingsClick(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await OpenSettingsAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Open settings failed");
+            SetStatus("Ошибка: " + ex.Message);
+        }
+    }
+
+    private async void OnSettingsBackRequested(object? sender, EventArgs e)
+    {
+        try
+        {
+            await CloseSettingsAsync(save: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Close settings failed");
+            SetStatus("Ошибка: " + ex.Message);
+        }
+    }
+
+    private async Task OpenSettingsAsync()
+    {
+        if (_settingsOpen || _settingsAnimating)
+            return;
+
+        _settingsAnimating = true;
+        try
+        {
+            var vm = SettingsPage.DataContext as SettingsViewModel ?? new SettingsViewModel(_settings);
+            MapperConfig.Mapper.Map(_settings, vm);
+            SettingsPage.DataContext = vm;
+
+            // Native WebView sits above Avalonia and can steal IME focus on Android.
+            SetWebViewActive(false);
+
+            var width = Bounds.Width;
+            if (width <= 0)
+                width = 400;
+
+            _settingsTransform.X = width;
+            SettingsOverlay.IsVisible = true;
+            SettingsOverlay.IsHitTestVisible = true;
+
+            await SlideSettingsAsync(from: width, to: 0);
+            _settingsOpen = true;
+            SettingsPage.Focus();
+        }
+        finally
+        {
+            _settingsAnimating = false;
+        }
+    }
+
+    private async Task CloseSettingsAsync(bool save)
+    {
+        if (!_settingsOpen || _settingsAnimating)
+            return;
+
+        _settingsAnimating = true;
+        try
+        {
+            if (SettingsPage.DataContext is SettingsViewModel vm)
+            {
+                vm.Settings.Save();
+                _logger.LogInformation("Settings saved to {Path}", AppSettings.SettingsFilePath);
+            }
+
+            var width = Bounds.Width;
+            if (width <= 0)
+                width = 400;
+
+            await SlideSettingsAsync(from: 0, to: width);
+
+            SettingsOverlay.IsHitTestVisible = false;
+            SettingsOverlay.IsVisible = false;
+            _settingsTransform.X = 0;
+            SetWebViewActive(true);
+            _settingsOpen = false;
+        }
+        finally
+        {
+            _settingsAnimating = false;
+        }
+    }
+
+    private void SetWebViewActive(bool active)
+    {
+        RoomWebView.IsVisible = active;
+        RoomWebView.IsEnabled = active;
+        RoomWebView.IsHitTestVisible = active;
+        RoomWebView.IsTabStop = active;
+        if (!active)
+            RoomWebView.Focusable = false;
+        else
+            RoomWebView.Focusable = true;
+    }
+
+    private async Task SlideSettingsAsync(double from, double to)
+    {
+        // Animation.RunAsync on TranslateTransform hits TransformAnimator and throws;
+        // DoubleTransition on X is the supported path for transform offsets.
+        _settingsTransform.Transitions = null;
+        _settingsTransform.X = from;
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
+
+        _settingsTransform.Transitions =
+        [
+            new DoubleTransition
+            {
+                Property = TranslateTransform.XProperty,
+                Duration = TimeSpan.FromMilliseconds(280),
+                Easing = new CubicEaseOut()
+            }
+        ];
+
+        _settingsTransform.X = to;
+        await Task.Delay(280);
+    }
+
     private void NavigateToRoomHome()
     {
-        var url = (DataContext as MainViewModel)?.RoomUrl ?? MainViewModel.DefaultRoomUri;
+        var url = ResolveRoomUrl();
         _bridgeInstalled = false;
         _pageReady = false;
         SetStatus("Открытие страницы подключения…");
@@ -382,7 +503,7 @@ public partial class MainView : UserControl
         if (_navigationStarted)
             return;
 
-        var url = (DataContext as MainViewModel)?.RoomUrl ?? MainViewModel.DefaultRoomUri;
+        var url = ResolveRoomUrl();
         _navigationStarted = true;
         SetStatus("Открытие: " + url.Host + "…");
         _logger.LogInformation("Initial navigation to {Url}", url);
@@ -397,6 +518,54 @@ public partial class MainView : UserControl
             _logger.LogError(ex, "Initial navigation failed");
             SetStatus("Ошибка: " + ex.Message);
         }
+    }
+
+    private Uri ResolveRoomUrl()
+    {
+        var url = (DataContext as MainViewModel)?.RoomUrl ?? MainViewModel.DefaultRoomUri;
+        return ApplyToolbarVisibilityConfig(url);
+    }
+
+    private Uri ApplyToolbarVisibilityConfig(Uri url)
+    {
+        if (!_settings.ToolbarAlwaysVisible)
+            return url;
+
+        // Jitsi reads these from the URL hash (legacy + current config keys).
+        return WithHashParams(url,
+            ("config.toolbarConfig.alwaysVisible", "true"),
+            ("interfaceConfig.TOOLBAR_ALWAYS_VISIBLE", "true"));
+    }
+
+    private static Uri WithHashParams(Uri url, params (string Key, string Value)[] parameters)
+    {
+        var builder = new UriBuilder(url);
+        var fragment = (builder.Fragment ?? string.Empty).TrimStart('#');
+        var parts = string.IsNullOrEmpty(fragment)
+            ? new List<string>()
+            : new List<string>(fragment.Split('&', StringSplitOptions.RemoveEmptyEntries));
+
+        foreach (var (key, value) in parameters)
+        {
+            var assigned = false;
+            for (var i = 0; i < parts.Count; i++)
+            {
+                var eq = parts[i].IndexOf('=');
+                var name = eq >= 0 ? parts[i][..eq] : parts[i];
+                if (!string.Equals(name, key, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                parts[i] = $"{key}={value}";
+                assigned = true;
+                break;
+            }
+
+            if (!assigned)
+                parts.Add($"{key}={value}");
+        }
+
+        builder.Fragment = string.Join('&', parts);
+        return builder.Uri;
     }
 
     private void OnNavigationStarted(object? sender, WebViewNavigationEventArgs e)

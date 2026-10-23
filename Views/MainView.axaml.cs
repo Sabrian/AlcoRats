@@ -6,6 +6,7 @@ using AlcoRats.Services;
 using AlcoRats.ViewModels;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Interactivity;
 using Avalonia.Threading;
 
 namespace AlcoRats.Views;
@@ -18,6 +19,7 @@ public partial class MainView : UserControl
     private bool _pageReady;
     private bool _navigationStarted;
     private bool _bridgeInstalled;
+    private bool _conferenceActive;
 
     private const string ToggleMicScript = """
         (function () {
@@ -25,12 +27,16 @@ public partial class MainView : UserControl
             if (typeof APP !== 'undefined' && APP.conference) {
               if (typeof APP.conference.toggleAudioMuted === 'function') {
                 APP.conference.toggleAudioMuted();
+                if (typeof window.__alcoRatsPublishConference === 'function')
+                  setTimeout(window.__alcoRatsPublishConference, 120);
                 return 'ok';
               }
               if (typeof APP.conference.muteAudio === 'function') {
                 var muted = typeof APP.conference.isLocalAudioMuted === 'function'
                   && APP.conference.isLocalAudioMuted();
                 APP.conference.muteAudio(!muted);
+                if (typeof window.__alcoRatsPublishConference === 'function')
+                  setTimeout(window.__alcoRatsPublishConference, 120);
                 return 'ok';
               }
             }
@@ -45,12 +51,16 @@ public partial class MainView : UserControl
             if (typeof APP !== 'undefined' && APP.conference) {
               if (typeof APP.conference.toggleVideoMuted === 'function') {
                 APP.conference.toggleVideoMuted();
+                if (typeof window.__alcoRatsPublishConference === 'function')
+                  setTimeout(window.__alcoRatsPublishConference, 120);
                 return 'ok';
               }
               if (typeof APP.conference.muteVideo === 'function') {
                 var muted = typeof APP.conference.isLocalVideoMuted === 'function'
                   && APP.conference.isLocalVideoMuted();
                 APP.conference.muteVideo(!muted);
+                if (typeof window.__alcoRatsPublishConference === 'function')
+                  setTimeout(window.__alcoRatsPublishConference, 120);
                 return 'ok';
               }
             }
@@ -64,6 +74,8 @@ public partial class MainView : UserControl
           try {
             if (typeof APP !== 'undefined' && APP.conference && typeof APP.conference.hangup === 'function') {
               APP.conference.hangup();
+              if (typeof window.__alcoRatsPublishConference === 'function')
+                setTimeout(window.__alcoRatsPublishConference, 150);
               return 'ok';
             }
           } catch (e) {}
@@ -73,6 +85,8 @@ public partial class MainView : UserControl
               var label = ((nodes[i].getAttribute('aria-label') || '') + ' ' + (nodes[i].getAttribute('data-testid') || '')).toLowerCase();
               if (label.indexOf('leave') >= 0 || label.indexOf('hangup') >= 0 || label.indexOf('покинуть') >= 0 || label.indexOf('заверш') >= 0) {
                 nodes[i].click();
+                if (typeof window.__alcoRatsPublishConference === 'function')
+                  setTimeout(window.__alcoRatsPublishConference, 150);
                 return 'dom';
               }
             }
@@ -84,8 +98,8 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 2) return 'exists';
-          window.__alcoRatsBridgeVersion = 2;
+          if (window.__alcoRatsBridgeVersion === 4) return 'exists';
+          window.__alcoRatsBridgeVersion = 4;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
 
           function addParticipant(byId, p, isLocal) {
@@ -111,17 +125,55 @@ public partial class MainView : UserControl
             }
           }
 
+          // True only while inside the live call — not prejoin, lobby, or joining.
+          function isConferenceActive() {
+            try {
+              if (typeof APP === 'undefined') return false;
+
+              var joinedApi = false;
+              var hasJoinedApi = false;
+              if (APP.conference && typeof APP.conference.isJoined === 'function') {
+                hasJoinedApi = true;
+                joinedApi = !!APP.conference.isJoined();
+              }
+
+              if (APP.store && typeof APP.store.getState === 'function') {
+                var state = APP.store.getState();
+                var conf = state['features/base/conference'] || {};
+                var prejoin = state['features/prejoin'] || state['features/base/prejoin'] || {};
+                var lobby = state['features/lobby'] || {};
+
+                if (prejoin.showPrejoin === true || prejoin.isPrejoinPageVisible === true)
+                  return false;
+                if (lobby.knocking === true || lobby.lobbyVisible === true)
+                  return false;
+                if (conf.joining || conf.leaving || conf.authRequired)
+                  return false;
+
+                // isJoined is authoritative once prejoin/lobby/joining are ruled out.
+                if (hasJoinedApi)
+                  return joinedApi;
+
+                return !!(conf.conference && conf.room);
+              }
+
+              return hasJoinedApi ? joinedApi : false;
+            } catch (e) {
+              return false;
+            }
+          }
+
           function collect() {
             var out = { active: false, audioMuted: false, videoMuted: false, participants: [] };
             try {
               if (typeof APP === 'undefined') return out;
 
-              if (APP.conference) {
-                if (typeof APP.conference.isJoined === 'function')
-                  out.active = !!APP.conference.isJoined();
-                else if (APP.conference._room)
-                  out.active = true;
+              out.active = isConferenceActive();
 
+              if (!out.active)
+                return out;
+
+              if (APP.conference) {
                 if (typeof APP.conference.isLocalAudioMuted === 'function')
                   out.audioMuted = !!APP.conference.isLocalAudioMuted();
                 if (typeof APP.conference.isLocalVideoMuted === 'function')
@@ -133,11 +185,9 @@ public partial class MainView : UserControl
                 var state = APP.store.getState();
                 var pstate = state['features/base/participants'];
                 if (pstate && typeof pstate === 'object') {
-                  // Modern Jitsi: local participant object + remote Map.
                   addParticipant(byId, pstate.local, true);
                   eachMapLike(pstate.remote, function (p) { addParticipant(byId, p, false); });
 
-                  // Older flat shape fallback (id -> participant).
                   Object.keys(pstate).forEach(function (key) {
                     if (key === 'local' || key === 'localScreenShare' || key === 'remote'
                       || key === 'sortedRemoteParticipants' || key === 'sortedRemoteVirtualScreenshareParticipants'
@@ -167,7 +217,6 @@ public partial class MainView : UserControl
                 } catch (e) {}
               }
 
-              // lib-jitsi-meet room participants
               if (Object.keys(byId).length <= 1 && APP.conference && APP.conference._room) {
                 try {
                   var room = APP.conference._room;
@@ -192,7 +241,6 @@ public partial class MainView : UserControl
               }
 
               out.participants = Object.keys(byId).map(function (k) { return byId[k]; });
-              if (out.participants.length > 0) out.active = true;
             } catch (e) {}
             return out;
           }
@@ -233,6 +281,8 @@ public partial class MainView : UserControl
     private void OnAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
         ConferenceSession.Register(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
+        ConferenceSession.StateChanged += OnConferenceSessionStateChanged;
+        UpdateConferenceActionButton(ConferenceSession.State.IsActive);
         WebViewPlatformSetup.Apply(RoomWebView);
         StartNavigation();
         _ = WatchdogAsync();
@@ -240,8 +290,62 @@ public partial class MainView : UserControl
 
     private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
+        ConferenceSession.StateChanged -= OnConferenceSessionStateChanged;
         ConferenceSession.Unregister(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
         _bridgeInstalled = false;
+    }
+
+    private void OnConferenceSessionStateChanged(ConferenceSessionState state)
+        => UpdateConferenceActionButton(state.IsActive);
+
+    private void UpdateConferenceActionButton(bool active)
+    {
+        void Apply()
+        {
+            _conferenceActive = active;
+            HomeIcon.IsVisible = !active;
+            HangupIcon.IsVisible = active;
+            ConferenceActionButton.SetValue(
+                ToolTip.TipProperty,
+                active ? "Покинуть конференцию" : "На страницу подключения");
+        }
+
+        if (Dispatcher.UIThread.CheckAccess())
+            Apply();
+        else
+            Dispatcher.UIThread.Post(Apply);
+    }
+
+    private async void OnConferenceActionClick(object? sender, RoutedEventArgs e)
+    {
+        if (_conferenceActive)
+        {
+            // Optimistic UI — bridge will confirm after hangup.
+            UpdateConferenceActionButton(false);
+            ConferenceSession.Publish(ConferenceSessionState.Inactive);
+            SetStatus("Выход из конференции…");
+            await ConferenceSession.LeaveAsync();
+            return;
+        }
+
+        NavigateToRoomHome();
+    }
+
+    private void NavigateToRoomHome()
+    {
+        var url = (DataContext as MainViewModel)?.RoomUrl ?? MainViewModel.DefaultRoomUri;
+        _bridgeInstalled = false;
+        _pageReady = false;
+        SetStatus("Открытие страницы подключения…");
+
+        try
+        {
+            RoomWebView.Navigate(url);
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Ошибка: " + ex.Message);
+        }
     }
 
     private void StartNavigation()
@@ -273,11 +377,19 @@ public partial class MainView : UserControl
     private async void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
     {
         _pageReady = e.IsSuccess;
-        SetStatus(e.IsSuccess ? "Конференция активна" : "Не удалось загрузить комнату.");
         if (e.IsSuccess)
-            await InstallBridgeAsync();
-        else
+        {
+            SetStatus("Ожидание подключения к конференции…");
             ConferenceSession.Publish(ConferenceSessionState.Inactive);
+            UpdateConferenceActionButton(false);
+            await InstallBridgeAsync();
+        }
+        else
+        {
+            SetStatus("Не удалось загрузить комнату.");
+            ConferenceSession.Publish(ConferenceSessionState.Inactive);
+            UpdateConferenceActionButton(false);
+        }
     }
 
     private async Task InstallBridgeAsync()
@@ -311,7 +423,9 @@ public partial class MainView : UserControl
             var videoMuted = root.TryGetProperty("videoMuted", out var vm) && vm.GetBoolean();
             var participants = new List<ConferenceParticipant>();
 
-            if (root.TryGetProperty("participants", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            if (active
+                && root.TryGetProperty("participants", out var arr)
+                && arr.ValueKind == JsonValueKind.Array)
             {
                 foreach (var item in arr.EnumerateArray())
                 {
@@ -323,10 +437,18 @@ public partial class MainView : UserControl
                 }
             }
 
-            ConferenceSession.Publish(new ConferenceSessionState(active, audioMuted, videoMuted, participants));
-            SetStatus(active
-                ? $"В конференции: {participants.Count}"
-                : "Ожидание подключения к конференции…");
+            // Status + notification panel only while actually in the live call.
+            if (!active)
+            {
+                ConferenceSession.Publish(ConferenceSessionState.Inactive);
+                UpdateConferenceActionButton(false);
+                SetStatus("Ожидание подключения к конференции…");
+                return;
+            }
+
+            ConferenceSession.Publish(new ConferenceSessionState(true, audioMuted, videoMuted, participants));
+            UpdateConferenceActionButton(true);
+            SetStatus($"В конференции: {participants.Count}");
         }
         catch
         {

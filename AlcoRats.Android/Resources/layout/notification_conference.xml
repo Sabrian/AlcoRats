@@ -37,7 +37,6 @@
                 android:ellipsize="end"
                 android:gravity="center_horizontal"
                 android:maxLines="1"
-                android:textColor="#E8E8ED"
                 android:textSize="10sp" />
         </LinearLayout>
 
@@ -64,7 +63,6 @@
                 android:ellipsize="end"
                 android:gravity="center_horizontal"
                 android:maxLines="1"
-                android:textColor="#E8E8ED"
                 android:textSize="10sp" />
         </LinearLayout>
 
@@ -91,7 +89,6 @@
                 android:ellipsize="end"
                 android:gravity="center_horizontal"
                 android:maxLines="1"
-                android:textColor="#E8E8ED"
                 android:textSize="10sp" />
         </LinearLayout>
 
@@ -118,7 +115,6 @@
                 android:ellipsize="end"
                 android:gravity="center_horizontal"
                 android:maxLines="1"
-                android:textColor="#E8E8ED"
                 android:textSize="10sp" />
         </LinearLayout>
 

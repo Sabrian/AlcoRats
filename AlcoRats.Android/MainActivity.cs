@@ -1,10 +1,12 @@
 using System.Collections.Generic;
 using System.Linq;
-using AlcoRats.Services;
 using Android;
 using Android.App;
 using Android.Content;
 using Android.Content.PM;
+using Android.Content.Res;
+using Android.Graphics;
+using Android.Graphics.Drawables;
 using Android.OS;
 using Android.Provider;
 using Android.Views;
@@ -41,11 +43,16 @@ public class MainActivity : AvaloniaMainActivity
         base.OnCreate(savedInstanceState);
 
         // Opaque window avoids black/blank frames with Avalonia + native WebView.
-        Window?.SetBackgroundDrawable(new global::Android.Graphics.Drawables.ColorDrawable(
-            global::Android.Graphics.Color.ParseColor("#1A1A22")));
+        ApplyWindowBackground();
 
         EnsureMediaPermissions();
         EnsureNotificationPermission();
+    }
+
+    public override void OnConfigurationChanged(Configuration newConfig)
+    {
+        base.OnConfigurationChanged(newConfig);
+        ApplyWindowBackground();
     }
 
     protected override void OnResume()
@@ -55,6 +62,12 @@ public class MainActivity : AvaloniaMainActivity
         // User may return from Settings after denying — ask again if still missing.
         if (!HasAllPermissions(MediaPermissions))
             EnsureMediaPermissions();
+    }
+
+    private void ApplyWindowBackground()
+    {
+        var color = new Color(ContextCompat.GetColor(this, Resource.Color.app_surface));
+        Window?.SetBackgroundDrawable(new ColorDrawable(color));
     }
 
     protected override void OnStart()
@@ -103,7 +116,7 @@ public class MainActivity : AvaloniaMainActivity
             && IsPlayPauseKey(e)
             && !e.IsCanceled)
         {
-            _ = ConferenceHotkeys.ToggleMicrophoneAsync();
+            ConferenceMediaSessionService.RequestToggleMicrophone(this);
             return true;
         }
 

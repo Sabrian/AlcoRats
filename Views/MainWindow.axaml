@@ -15,6 +15,6 @@
         MinHeight="568"
         CanResize="True"
         WindowStartupLocation="CenterScreen"
-        Background="#0B0B0F">
+        Background="{DynamicResource AppWindowBrush}">
     <views:MainView />
 </Window>

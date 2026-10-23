@@ -2,12 +2,15 @@ using System;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
 using AlcoRats.Services;
 using Android.App;
 using Android.Content;
 using Android.Content.PM;
+using Android.Content.Res;
 using Android.Graphics;
+using Android.Media;
 using Android.OS;
 using Android.Views;
 using Android.Widget;
@@ -91,12 +94,10 @@ public sealed class ConferenceMediaSessionService : Service
         switch (intent?.Action)
         {
             case ActionToggleMic:
-                BeginMicPending();
-                _ = ConferenceSession.ToggleMicrophoneAsync();
+                TryToggleMicrophone();
                 break;
             case ActionToggleCam:
-                BeginCamPending();
-                _ = ConferenceSession.ToggleCameraAsync();
+                TryToggleCamera();
                 break;
             case ActionLeave:
                 ClearPending(mic: true, cam: true);
@@ -130,9 +131,37 @@ public sealed class ConferenceMediaSessionService : Service
 
     private void OnConferenceStateChanged(ConferenceSessionState state)
     {
+        var micChanged = state.IsActive
+            && _lastState.IsActive
+            && state.AudioMuted != _lastState.AudioMuted;
+
         ResolvePendingFromState(state);
         _lastState = state;
         _ = PrefetchAvatarsAndRefreshAsync(state);
+
+        if (micChanged)
+            PlayMicStatusTone(microphoneOn: !state.AudioMuted);
+    }
+
+    /// <summary>Shared path for notification button and media hotkeys.</summary>
+    private bool TryToggleMicrophone()
+    {
+        if (_micPending)
+            return false;
+
+        BeginMicPending();
+        _ = ConferenceSession.ToggleMicrophoneAsync();
+        return true;
+    }
+
+    private bool TryToggleCamera()
+    {
+        if (_camPending)
+            return false;
+
+        BeginCamPending();
+        _ = ConferenceSession.ToggleCameraAsync();
+        return true;
     }
 
     private Handler MainHandler => _mainHandler ??= new Handler(Looper.MainLooper!);
@@ -272,7 +301,7 @@ public sealed class ConferenceMediaSessionService : Service
             PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable)!;
 
         _session = new MediaSessionCompat(this, "AlcoRatsConference");
-        _callback = new MediaSessionCallback();
+        _callback = new MediaSessionCallback(this);
         _session.SetCallback(_callback);
         _session.SetMediaButtonReceiver(mediaButtonPendingIntent);
 #pragma warning disable CS0618
@@ -385,6 +414,7 @@ public sealed class ConferenceMediaSessionService : Service
             var participant = participants[i];
             views.SetViewVisibility(containerId, ViewStates.Visible);
             views.SetTextViewText(nameId, TruncateName(participant.Name));
+            views.SetTextColor(nameId, ResolveNameTextColor());
 
             if (!string.IsNullOrWhiteSpace(participant.AvatarUrl)
                 && AvatarCache.TryGetValue(participant.AvatarUrl, out var bitmap)
@@ -429,6 +459,72 @@ public sealed class ConferenceMediaSessionService : Service
         return value.Length <= 10 ? value : value[..10] + "...";
     }
 
+    private Color ResolveNameTextColor()
+    {
+        var night = (Resources!.Configuration!.UiMode & UiMode.NightMask) == UiMode.NightYes;
+        return new Color(Color.ParseColor(night ? "#E8E8ED" : "#1C1B1F"));
+    }
+
+    private static void PlayMicStatusTone(bool microphoneOn)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                // Ascending when enabling mic, descending when muting.
+                var firstHz = microphoneOn ? 740.0 : 987.0;
+                var secondHz = microphoneOn ? 987.0 : 740.0;
+                PlayTone(firstHz, 70);
+                Thread.Sleep(40);
+                PlayTone(secondHz, 95);
+            }
+            catch
+            {
+                // Sonification is best-effort.
+            }
+        });
+    }
+
+    private static void PlayTone(double frequencyHz, int durationMs)
+    {
+        const int sampleRate = 22050;
+        var sampleCount = Math.Max(1, sampleRate * durationMs / 1000);
+        var samples = new short[sampleCount];
+        var attack = Math.Max(1, sampleRate / 100);
+        var release = Math.Max(1, sampleRate / 50);
+
+        for (var i = 0; i < sampleCount; i++)
+        {
+            var envelope = 1.0;
+            if (i < attack)
+                envelope = (double)i / attack;
+            else if (i > sampleCount - release)
+                envelope = (double)(sampleCount - i) / release;
+
+            var sample = Math.Sin(2 * Math.PI * frequencyHz * i / sampleRate) * short.MaxValue * 0.32 * envelope;
+            samples[i] = (short)sample;
+        }
+
+        using var track = new AudioTrack.Builder()
+            .SetAudioAttributes(new AudioAttributes.Builder()!
+                .SetUsage(AudioUsageKind.AssistanceSonification)!
+                .SetContentType(AudioContentType.Sonification)!
+                .Build()!)!
+            .SetAudioFormat(new AudioFormat.Builder()!
+                .SetEncoding(Encoding.Pcm16bit)!
+                .SetSampleRate(sampleRate)!
+                .SetChannelMask(ChannelOut.Mono)!
+                .Build()!)!
+            .SetBufferSizeInBytes(samples.Length * sizeof(short))!
+            .SetTransferMode(AudioTrackMode.Static)!
+            .Build()!;
+
+        track.Write(samples, 0, samples.Length);
+        track.Play();
+        Thread.Sleep(durationMs + 25);
+        track.Stop();
+    }
+
     private PendingIntent CreateActionPendingIntent(string action, int requestCode)
     {
         var intent = new Intent(this, typeof(ConferenceMediaSessionService));
@@ -465,6 +561,16 @@ public sealed class ConferenceMediaSessionService : Service
             context.StartService(intent);
     }
 
+    public static void RequestToggleMicrophone(Context context)
+    {
+        var intent = new Intent(context, typeof(ConferenceMediaSessionService));
+        intent.SetAction(ActionToggleMic);
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(26))
+            context.StartForegroundService(intent);
+        else
+            context.StartService(intent);
+    }
+
     public static void Stop(Context context)
     {
         context.StopService(new Intent(context, typeof(ConferenceMediaSessionService)));
@@ -472,6 +578,11 @@ public sealed class ConferenceMediaSessionService : Service
 
     private sealed class MediaSessionCallback : MediaSessionCompat.Callback
     {
+        private readonly ConferenceMediaSessionService _service;
+
+        public MediaSessionCallback(ConferenceMediaSessionService service)
+            => _service = service;
+
         public override void OnPlay() => Toggle();
 
         public override void OnPause() => Toggle();
@@ -497,8 +608,14 @@ public sealed class ConferenceMediaSessionService : Service
             return base.OnMediaButtonEvent(mediaButtonEvent);
         }
 
-        private static void Toggle()
-            => _ = ConferenceSession.ToggleMicrophoneAsync();
+        private void Toggle()
+        {
+            _service.MainHandler.Post(() =>
+            {
+                if (_service.TryToggleMicrophone())
+                    _service.PublishForeground(_service._lastState);
+            });
+        }
 
         private static KeyEvent? ExtractKeyEvent(Intent? mediaButtonEvent)
         {

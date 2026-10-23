@@ -6,8 +6,8 @@
              xmlns:views="using:AlcoRats.Views"
              xmlns:materialIcons="clr-namespace:Material.Icons.Avalonia;assembly=Material.Icons.Avalonia"
              mc:Ignorable="d"
-             d:DesignWidth="390"
-             d:DesignHeight="844"
+             d:DesignWidth="448"
+             d:DesignHeight="997"
              x:Class="AlcoRats.Views.MainView"
              x:DataType="vm:MainViewModel"
              Background="{DynamicResource AppSurfaceBrush}">
@@ -23,19 +23,19 @@
     -->
     <Panel>
         <DockPanel x:Name="ConferencePane">
-            <Border DockPanel.Dock="Bottom"
+            <Border x:Name="StatusPanel"
+                    DockPanel.Dock="Bottom"
                     Background="{DynamicResource StatusBarBackgroundBrush}"
                     Padding="12,8">
                 <Grid ColumnDefinitions="*,Auto">
-                    <ContentControl x:Name="StatusContent"
-                                    Grid.Column="0"
-                                    VerticalAlignment="Center"
-                                    Margin="0,0,8,0"
-                                    Foreground="{DynamicResource StatusBarForegroundBrush}"
-                                    FontSize="13">
-                        <TextBlock Text="Загрузка комнаты…"
-                                   TextWrapping="Wrap" />
-                    </ContentControl>
+                    <TextBlock x:Name="StatusText"
+                               Grid.Column="0"
+                               Text="Загрузка комнаты…"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}"
+                               FontSize="13"
+                               TextWrapping="Wrap"
+                               VerticalAlignment="Center"
+                               Margin="0,0,8,0" />
 
                     <StackPanel Grid.Column="1"
                                 Orientation="Horizontal"

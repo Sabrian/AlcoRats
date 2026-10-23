@@ -3,17 +3,18 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        d:DesignWidth="390"
-        d:DesignHeight="844"
+        d:DesignWidth="448"
+        d:DesignHeight="997"
         x:Class="AlcoRats.Views.MainWindow"
         Icon="/Assets/avalonia-logo.ico"
         Title="AlcoRats"
-        Width="390"
-        Height="844"
-        MinWidth="320"
-        MinHeight="568"
+        Width="448"
+        Height="997"
+        MinWidth="360"
+        MinHeight="640"
         CanResize="True"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource AppWindowBrush}">
+    <!-- Desktop preview sized to Pixel 8 Pro CSS viewport (448×997 @3x). -->
     <Panel x:Name="RootHost" />
 </Window>

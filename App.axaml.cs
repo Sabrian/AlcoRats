@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -17,6 +18,12 @@ public partial class App : Application
 {
     public override void Initialize()
     {
+        var ru = CultureInfo.GetCultureInfo("ru-RU");
+        CultureInfo.DefaultThreadCurrentCulture = ru;
+        CultureInfo.DefaultThreadCurrentUICulture = ru;
+        CultureInfo.CurrentCulture = ru;
+        CultureInfo.CurrentUICulture = ru;
+
         AvaloniaXamlLoader.Load(this);
 #if DEBUG
         this.AttachDeveloperTools();

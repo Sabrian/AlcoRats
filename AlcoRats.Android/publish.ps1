@@ -1,0 +1,1 @@
+﻿dotnet publish AlcoRats.Android.csproj -c Release -f net10.0-android -p:RuntimeIdentifier=android-arm64 -p:AndroidPackageFormat=apk

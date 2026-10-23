@@ -5,8 +5,8 @@
              xmlns:vm="using:AlcoRats.ViewModels"
              xmlns:materialIcons="clr-namespace:Material.Icons.Avalonia;assembly=Material.Icons.Avalonia"
              mc:Ignorable="d"
-             d:DesignWidth="390"
-             d:DesignHeight="844"
+             d:DesignWidth="448"
+             d:DesignHeight="997"
              x:Class="AlcoRats.Views.SettingsView"
              x:DataType="vm:SettingsViewModel"
              Background="{DynamicResource AppSurfaceBrush}">

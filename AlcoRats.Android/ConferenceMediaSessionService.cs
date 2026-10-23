@@ -54,6 +54,7 @@ public sealed class ConferenceMediaSessionService : Service
     private bool _camPending;
     private bool _audioMutedWhenMicPending;
     private bool _videoMutedWhenCamPending;
+    private static readonly object ToneLock = new();
     private Java.Lang.IRunnable? _clearMicPendingRunnable;
     private Java.Lang.IRunnable? _clearCamPendingRunnable;
     private readonly int[] _participantContainerIds =
@@ -149,7 +150,6 @@ public sealed class ConferenceMediaSessionService : Service
             && _lastState.IsActive
             && state.AudioMuted != _lastState.AudioMuted;
 
-        UpdateChatJoinBaseline(state);
         var newChatMessage = ShouldPlayIncomingMessageTone(state);
 
         ResolvePendingFromState(state);
@@ -163,28 +163,12 @@ public sealed class ConferenceMediaSessionService : Service
             PlayIncomingMessageTone();
     }
 
-    private void UpdateChatJoinBaseline(ConferenceSessionState state)
-    {
-        if (!state.IsActive)
-        {
-            return;
-        }
-
-        if (!_lastState.IsActive)
-        {
-            return;
-        }
-    }
-
     private bool ShouldPlayIncomingMessageTone(ConferenceSessionState state)
     {
         if (!state.IsActive || !_lastState.IsActive)
             return false;
 
-        if (state.UnreadChatCount <= _lastState.UnreadChatCount)
-            return false;
-
-        return true;
+        return state.UnreadChatCount > _lastState.UnreadChatCount;
     }
 
     private static IConferenceSession? ResolveConferenceSession()
@@ -588,14 +572,14 @@ public sealed class ConferenceMediaSessionService : Service
         var sampleCount = Math.Max(1, sampleRate * durationMs / 1000);
         var samples = new short[sampleCount];
 
-        // E major arpeggio — consonant and “notification-like”.
+        // E major arpeggio — consonant and “notification-like” (loud gains).
         (double Hz, double Start, double Length, double Gain)[] voices =
         [
-            (329.63, 0.00, 0.55, 0.22), // E4
-            (415.30, 0.12, 0.55, 0.20), // G#4
-            (493.88, 0.24, 0.55, 0.18), // B4
-            (659.25, 0.38, 0.62, 0.24), // E5
-            (830.61, 0.52, 0.48, 0.10), // G#5 sparkle
+            (329.63, 0.00, 0.55, 0.55), // E4
+            (415.30, 0.12, 0.55, 0.50), // G#4
+            (493.88, 0.24, 0.55, 0.45), // B4
+            (659.25, 0.38, 0.62, 0.60), // E5
+            (830.61, 0.52, 0.48, 0.28), // G#5 sparkle
         ];
 
         for (var i = 0; i < sampleCount; i++)
@@ -649,8 +633,8 @@ public sealed class ConferenceMediaSessionService : Service
             else if (i > sampleCount - release)
                 envelope = (double)(sampleCount - i) / release;
 
-            var sample = Math.Sin(2 * Math.PI * frequencyHz * i / sampleRate) * short.MaxValue * 0.32 * envelope;
-            samples[i] = (short)sample;
+            var sample = Math.Sin(2 * Math.PI * frequencyHz * i / sampleRate) * short.MaxValue * 1.0 * envelope;
+            samples[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
         }
 
         PlayPcm(samples);
@@ -658,27 +642,33 @@ public sealed class ConferenceMediaSessionService : Service
 
     private static void PlayPcm(short[] samples)
     {
-        const int sampleRate = 22050;
-        var durationMs = Math.Max(1, samples.Length * 1000 / sampleRate);
+        // Serialize tones — overlapping Static AudioTracks are often dropped mid-call.
+        lock (ToneLock)
+        {
+            const int sampleRate = 22050;
+            var durationMs = Math.Max(1, samples.Length * 1000 / sampleRate);
 
-        using var track = new AudioTrack.Builder()
-            .SetAudioAttributes(new AudioAttributes.Builder()!
-                .SetUsage(AudioUsageKind.AssistanceSonification)!
-                .SetContentType(AudioContentType.Sonification)!
-                .Build()!)!
-            .SetAudioFormat(new AudioFormat.Builder()!
-                .SetEncoding(Encoding.Pcm16bit)!
-                .SetSampleRate(sampleRate)!
-                .SetChannelMask(ChannelOut.Mono)!
-                .Build()!)!
-            .SetBufferSizeInBytes(samples.Length * sizeof(short))!
-            .SetTransferMode(AudioTrackMode.Static)!
-            .Build()!;
+            using var track = new AudioTrack.Builder()
+                .SetAudioAttributes(new AudioAttributes.Builder()!
+                    // In-call signalling survives WebRTC audio focus better than Notification*.
+                    .SetUsage(AudioUsageKind.VoiceCommunicationSignalling)!
+                    .SetContentType(AudioContentType.Sonification)!
+                    .Build()!)!
+                .SetAudioFormat(new AudioFormat.Builder()!
+                    .SetEncoding(Encoding.Pcm16bit)!
+                    .SetSampleRate(sampleRate)!
+                    .SetChannelMask(ChannelOut.Mono)!
+                    .Build()!)!
+                .SetBufferSizeInBytes(samples.Length * sizeof(short))!
+                .SetTransferMode(AudioTrackMode.Static)!
+                .Build()!;
 
-        track.Write(samples, 0, samples.Length);
-        track.Play();
-        Thread.Sleep(durationMs + 20);
-        track.Stop();
+            track.SetVolume(1f);
+            track.Write(samples, 0, samples.Length);
+            track.Play();
+            Thread.Sleep(durationMs + 20);
+            track.Stop();
+        }
     }
 
     private PendingIntent CreateActionPendingIntent(string action, int requestCode)

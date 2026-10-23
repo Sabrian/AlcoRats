@@ -9,6 +9,8 @@
     <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
     <AndroidEnableProfiledAot>false</AndroidEnableProfiledAot>
+    <!-- Pixel / physical devices need arm64; x64 is for the emulator. -->
+    <RuntimeIdentifiers>android-arm64;android-x64</RuntimeIdentifiers>
     <RootNamespace>AlcoRats.Android</RootNamespace>
   </PropertyGroup>
 

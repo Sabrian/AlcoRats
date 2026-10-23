@@ -12,6 +12,7 @@ using Android.Provider;
 using Android.Views;
 using AndroidX.Core.App;
 using AndroidX.Core.Content;
+using AndroidX.Core.View;
 using Avalonia.Android;
 
 namespace AlcoRats.Android;
@@ -38,7 +39,8 @@ public class MainActivity : AvaloniaMainActivity
         Manifest.Permission.RecordAudio
     ];
 
-    private bool _mediaPermissionPromptShown;
+    private bool _permissionRequestInFlight;
+    private bool _mediaSessionStarted;
 
     protected override void OnCreate(Bundle? savedInstanceState)
     {
@@ -46,9 +48,35 @@ public class MainActivity : AvaloniaMainActivity
 
         // Opaque window avoids black/blank frames with Avalonia + native WebView.
         ApplyWindowBackground();
+        FitDisplayToDevice();
 
-        EnsureMediaPermissions();
-        EnsureNotificationPermission();
+        // One runtime permission dialog at a time — parallel RequestPermissions is unreliable
+        // and can crash/cancel the first prompt on first launch (esp. Android 13+).
+        RequestNextPermission();
+    }
+
+    /// <summary>
+    /// Keep Avalonia/WebView in the usable area above system bars.
+    /// Edge-to-edge (DecorFitsSystemWindows=false) leaves a nav-bar gap under Jitsi's
+    /// floating toolbar while the toolbar still overlays the video — avoid that.
+    /// </summary>
+    private void FitDisplayToDevice()
+    {
+        if (Window is null)
+            return;
+
+        // Let the framework inset content for status + navigation bars.
+        WindowCompat.SetDecorFitsSystemWindows(Window, true);
+
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(28))
+        {
+            var layoutParams = Window.Attributes;
+            if (layoutParams is not null)
+            {
+                layoutParams.LayoutInDisplayCutoutMode = LayoutInDisplayCutoutMode.ShortEdges;
+                Window.Attributes = layoutParams;
+            }
+        }
     }
 
     public override void OnConfigurationChanged(Configuration newConfig)
@@ -61,9 +89,10 @@ public class MainActivity : AvaloniaMainActivity
     {
         base.OnResume();
 
-        // User may return from Settings after denying — ask again if still missing.
-        if (!HasAllPermissions(MediaPermissions))
-            EnsureMediaPermissions();
+        if (!_permissionRequestInFlight)
+            RequestNextPermission();
+
+        TryStartMediaSession();
     }
 
     private void ApplyWindowBackground()
@@ -75,13 +104,16 @@ public class MainActivity : AvaloniaMainActivity
     protected override void OnStart()
     {
         base.OnStart();
-        ConferenceMediaSessionService.Start(this);
+        TryStartMediaSession();
     }
 
     protected override void OnDestroy()
     {
         if (IsFinishing)
+        {
             ConferenceMediaSessionService.Stop(this);
+            _mediaSessionStarted = false;
+        }
 
         base.OnDestroy();
     }
@@ -92,23 +124,28 @@ public class MainActivity : AvaloniaMainActivity
         Permission[] grantResults)
     {
         base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
+        _permissionRequestInFlight = false;
 
-        if (requestCode != MediaPermissionRequestCode)
-            return;
+        if (requestCode == MediaPermissionRequestCode)
+        {
+            if (!HasAllPermissions(MediaPermissions))
+            {
+                var permanentlyDenied = MediaPermissions.Any(permission =>
+                    ContextCompat.CheckSelfPermission(this, permission) != Permission.Granted
+                    && !ActivityCompat.ShouldShowRequestPermissionRationale(this, permission));
 
-        _mediaPermissionPromptShown = false;
+                if (permanentlyDenied)
+                    ShowOpenSettingsDialog();
+                else
+                    ShowPermissionRationaleDialog();
 
-        if (HasAllPermissions(MediaPermissions))
-            return;
+                return;
+            }
+        }
 
-        var permanentlyDenied = MediaPermissions.Any(permission =>
-            ContextCompat.CheckSelfPermission(this, permission) != Permission.Granted
-            && !ActivityCompat.ShouldShowRequestPermissionRationale(this, permission));
-
-        if (permanentlyDenied)
-            ShowOpenSettingsDialog();
-        else
-            ShowPermissionRationaleDialog();
+        // Continue the chain (notifications after media, etc.) then start FGS if allowed.
+        RequestNextPermission();
+        TryStartMediaSession();
     }
 
     public override bool DispatchKeyEvent(KeyEvent? e)
@@ -125,31 +162,49 @@ public class MainActivity : AvaloniaMainActivity
         return base.DispatchKeyEvent(e);
     }
 
-    private void EnsureMediaPermissions()
+    /// <summary>
+    /// Asks for the next missing permission group. Never overlaps two system dialogs.
+    /// Order: camera+mic first (needed for call + mic FGS), then notifications (Android 13+).
+    /// </summary>
+    private void RequestNextPermission()
     {
-        var missing = GetMissingPermissions(MediaPermissions);
-        if (missing.Length == 0)
+        if (_permissionRequestInFlight)
             return;
 
-        if (_mediaPermissionPromptShown)
+        var missingMedia = GetMissingPermissions(MediaPermissions);
+        if (missingMedia.Length > 0)
+        {
+            _permissionRequestInFlight = true;
+            ActivityCompat.RequestPermissions(this, missingMedia, MediaPermissionRequestCode);
             return;
+        }
 
-        _mediaPermissionPromptShown = true;
-        ActivityCompat.RequestPermissions(this, missing, MediaPermissionRequestCode);
+        if (NeedsNotificationPermission())
+        {
+            _permissionRequestInFlight = true;
+            ActivityCompat.RequestPermissions(
+                this,
+                [Manifest.Permission.PostNotifications],
+                NotificationPermissionRequestCode);
+        }
     }
 
-    private void EnsureNotificationPermission()
+    private bool NeedsNotificationPermission()
+        => global::System.OperatingSystem.IsAndroidVersionAtLeast(33)
+           && ContextCompat.CheckSelfPermission(this, Manifest.Permission.PostNotifications)
+              != Permission.Granted;
+
+    private void TryStartMediaSession()
     {
-        if (!global::System.OperatingSystem.IsAndroidVersionAtLeast(33))
+        if (_mediaSessionStarted)
             return;
 
-        if (ContextCompat.CheckSelfPermission(this, Manifest.Permission.PostNotifications) == Permission.Granted)
+        // Android 14+ can kill/crash a microphone FGS if RECORD_AUDIO is not granted yet.
+        if (ContextCompat.CheckSelfPermission(this, Manifest.Permission.RecordAudio) != Permission.Granted)
             return;
 
-        ActivityCompat.RequestPermissions(
-            this,
-            [Manifest.Permission.PostNotifications],
-            NotificationPermissionRequestCode);
+        ConferenceMediaSessionService.Start(this);
+        _mediaSessionStarted = true;
     }
 
     private void ShowPermissionRationaleDialog()
@@ -158,11 +213,7 @@ public class MainActivity : AvaloniaMainActivity
             .SetTitle("Нужны камера и микрофон")!
             .SetMessage("Для видеозвонка в комнате Jitsi приложению нужны доступ к камере и микрофону.")!
             .SetCancelable(false)!
-            .SetPositiveButton("Разрешить", (_, _) =>
-            {
-                _mediaPermissionPromptShown = false;
-                EnsureMediaPermissions();
-            })!
+            .SetPositiveButton("Разрешить", (_, _) => RequestNextPermission())!
             .SetNegativeButton("Позже", (_, _) => { })!
             .Show();
     }

@@ -8,30 +8,29 @@
              d:DesignHeight="844"
              x:Class="AlcoRats.Views.MainView"
              x:DataType="vm:MainViewModel"
-             Background="#0B0B0F">
+             Background="#1A1A22">
 
     <Design.DataContext>
         <vm:MainViewModel />
     </Design.DataContext>
 
-    <Grid>
-        <NativeWebView x:Name="RoomWebView"
-                       Source="{Binding RoomUrl}" />
-
-        <Border x:Name="LoadingOverlay"
-                Background="#CC0B0B0F"
-                IsHitTestVisible="True">
-            <StackPanel HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        Spacing="12">
-                <ProgressBar IsIndeterminate="True"
-                             Width="160"
-                             Height="4" />
-                <TextBlock Text="Подключение к комнате…"
-                           Foreground="#E8E8ED"
-                           FontSize="14"
-                           HorizontalAlignment="Center" />
-            </StackPanel>
+    <!--
+      NativeWebView sits above Avalonia in its own region, so do not put
+      Avalonia overlays on top of it — they won't be visible on Android.
+    -->
+    <DockPanel>
+        <Border DockPanel.Dock="Top"
+                Background="#252532"
+                Padding="12,10">
+            <TextBlock x:Name="StatusText"
+                       Text="Загрузка комнаты…"
+                       Foreground="#E8E8ED"
+                       FontSize="13"
+                       TextWrapping="Wrap" />
         </Border>
-    </Grid>
+
+        <NativeWebView x:Name="RoomWebView"
+                       HorizontalAlignment="Stretch"
+                       VerticalAlignment="Stretch" />
+    </DockPanel>
 </UserControl>

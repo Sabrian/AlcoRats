@@ -1,7 +1,0 @@
-<Solution>
-  <Project Path="AlcoRats.csproj" />
-  <Project Path="AlcoRats.Desktop\AlcoRats.Desktop.csproj" />
-  <Project Path="AlcoRats.Android\AlcoRats.Android.csproj" />
-  <Project Path="AlcoRats.iOS\AlcoRats.iOS.csproj" />
-</Solution>
-

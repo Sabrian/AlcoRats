@@ -1,8 +1,13 @@
+using System.Collections.Generic;
 using System.Linq;
+using AlcoRats.Services;
 using Android;
 using Android.App;
+using Android.Content;
 using Android.Content.PM;
 using Android.OS;
+using Android.Provider;
+using Android.Views;
 using AndroidX.Core.App;
 using AndroidX.Core.Content;
 using Avalonia.Android;
@@ -15,32 +20,170 @@ namespace AlcoRats.Android;
     Icon = "@drawable/icon",
     MainLauncher = true,
     ScreenOrientation = ScreenOrientation.Portrait,
-    ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.UiMode)]
+    ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.UiMode,
+    LaunchMode = LaunchMode.SingleTop)]
 public class MainActivity : AvaloniaMainActivity
 {
     private const int MediaPermissionRequestCode = 1001;
+    private const int NotificationPermissionRequestCode = 1002;
 
-    private static readonly string[] RequiredPermissions =
+    /// <summary>Camera + microphone — required for the Jitsi room.</summary>
+    private static readonly string[] MediaPermissions =
     [
         Manifest.Permission.Camera,
-        Manifest.Permission.RecordAudio,
-        Manifest.Permission.ModifyAudioSettings
+        Manifest.Permission.RecordAudio
     ];
+
+    private bool _mediaPermissionPromptShown;
 
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
-        RequestMediaPermissionsIfNeeded();
+
+        // Opaque window avoids black/blank frames with Avalonia + native WebView.
+        Window?.SetBackgroundDrawable(new global::Android.Graphics.Drawables.ColorDrawable(
+            global::Android.Graphics.Color.ParseColor("#1A1A22")));
+
+        EnsureMediaPermissions();
+        EnsureNotificationPermission();
     }
 
-    private void RequestMediaPermissionsIfNeeded()
+    protected override void OnResume()
     {
-        var missing = RequiredPermissions
+        base.OnResume();
+
+        // User may return from Settings after denying — ask again if still missing.
+        if (!HasAllPermissions(MediaPermissions))
+            EnsureMediaPermissions();
+    }
+
+    protected override void OnStart()
+    {
+        base.OnStart();
+        ConferenceMediaSessionService.Start(this);
+    }
+
+    protected override void OnDestroy()
+    {
+        if (IsFinishing)
+            ConferenceMediaSessionService.Stop(this);
+
+        base.OnDestroy();
+    }
+
+    public override void OnRequestPermissionsResult(
+        int requestCode,
+        string[] permissions,
+        Permission[] grantResults)
+    {
+        base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode != MediaPermissionRequestCode)
+            return;
+
+        _mediaPermissionPromptShown = false;
+
+        if (HasAllPermissions(MediaPermissions))
+            return;
+
+        var permanentlyDenied = MediaPermissions.Any(permission =>
+            ContextCompat.CheckSelfPermission(this, permission) != Permission.Granted
+            && !ActivityCompat.ShouldShowRequestPermissionRationale(this, permission));
+
+        if (permanentlyDenied)
+            ShowOpenSettingsDialog();
+        else
+            ShowPermissionRationaleDialog();
+    }
+
+    public override bool DispatchKeyEvent(KeyEvent? e)
+    {
+        if (e is not null
+            && e.Action == KeyEventActions.Down
+            && IsPlayPauseKey(e)
+            && !e.IsCanceled)
+        {
+            _ = ConferenceHotkeys.ToggleMicrophoneAsync();
+            return true;
+        }
+
+        return base.DispatchKeyEvent(e);
+    }
+
+    private void EnsureMediaPermissions()
+    {
+        var missing = GetMissingPermissions(MediaPermissions);
+        if (missing.Length == 0)
+            return;
+
+        if (_mediaPermissionPromptShown)
+            return;
+
+        _mediaPermissionPromptShown = true;
+        ActivityCompat.RequestPermissions(this, missing, MediaPermissionRequestCode);
+    }
+
+    private void EnsureNotificationPermission()
+    {
+        if (!global::System.OperatingSystem.IsAndroidVersionAtLeast(33))
+            return;
+
+        if (ContextCompat.CheckSelfPermission(this, Manifest.Permission.PostNotifications) == Permission.Granted)
+            return;
+
+        ActivityCompat.RequestPermissions(
+            this,
+            [Manifest.Permission.PostNotifications],
+            NotificationPermissionRequestCode);
+    }
+
+    private void ShowPermissionRationaleDialog()
+    {
+        new AlertDialog.Builder(this)
+            .SetTitle("Нужны камера и микрофон")!
+            .SetMessage("Для видеозвонка в комнате Jitsi приложению нужны доступ к камере и микрофону.")!
+            .SetCancelable(false)!
+            .SetPositiveButton("Разрешить", (_, _) =>
+            {
+                _mediaPermissionPromptShown = false;
+                EnsureMediaPermissions();
+            })!
+            .SetNegativeButton("Позже", (_, _) => { })!
+            .Show();
+    }
+
+    private void ShowOpenSettingsDialog()
+    {
+        new AlertDialog.Builder(this)
+            .SetTitle("Разрешения отключены")!
+            .SetMessage("Камера или микрофон запрещены. Откройте настройки приложения и включите их вручную.")!
+            .SetCancelable(false)!
+            .SetPositiveButton("Настройки", (_, _) => OpenAppSettings())!
+            .SetNegativeButton("Позже", (_, _) => { })!
+            .Show();
+    }
+
+    private void OpenAppSettings()
+    {
+        var intent = new Intent(Settings.ActionApplicationDetailsSettings);
+        intent.SetData(global::Android.Net.Uri.FromParts("package", PackageName, null));
+        intent.AddFlags(ActivityFlags.NewTask);
+        StartActivity(intent);
+    }
+
+    private bool HasAllPermissions(IEnumerable<string> permissions)
+        => permissions.All(permission =>
+            ContextCompat.CheckSelfPermission(this, permission) == Permission.Granted);
+
+    private string[] GetMissingPermissions(IEnumerable<string> permissions)
+        => permissions
             .Where(permission =>
                 ContextCompat.CheckSelfPermission(this, permission) != Permission.Granted)
             .ToArray();
 
-        if (missing.Length > 0)
-            ActivityCompat.RequestPermissions(this, missing, MediaPermissionRequestCode);
-    }
+    private static bool IsPlayPauseKey(KeyEvent e)
+        => e.KeyCode is Keycode.MediaPlayPause
+            or Keycode.Headsethook
+            or Keycode.MediaPlay
+            or Keycode.MediaPause;
 }

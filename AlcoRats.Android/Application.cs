@@ -15,7 +15,18 @@ public class Application : AvaloniaAndroidApplication<App>
 
     protected override AppBuilder CustomizeAppBuilder(AppBuilder builder)
     {
+        WebViewMediaPermissionBridge.Register();
+
+        // Emulators often fail EGL and stay black; Software is a reliable fallback.
         return base.CustomizeAppBuilder(builder)
-            .WithInterFont();
+            .WithInterFont()
+            .With(new AndroidPlatformOptions
+            {
+                RenderingMode =
+                [
+                    AndroidRenderingMode.Egl,
+                    AndroidRenderingMode.Software
+                ]
+            });
     }
 }

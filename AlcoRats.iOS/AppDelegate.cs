@@ -1,3 +1,4 @@
+using AlcoRats.Services.Speech;
 using Foundation;
 using Avalonia;
 using Avalonia.iOS;
@@ -11,6 +12,9 @@ public partial class AppDelegate : AvaloniaAppDelegate<App>
 {
     protected override AppBuilder CustomizeAppBuilder(AppBuilder builder)
     {
+        TtsService.Configure(new CompositeTtsEngine(new PiperTtsEngine()));
+        ParticipantAnnouncer.Start();
+
         return base.CustomizeAppBuilder(builder)
             .WithInterFont();
     }

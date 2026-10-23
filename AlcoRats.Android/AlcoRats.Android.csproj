@@ -22,6 +22,8 @@
     <PackageReference Include="Avalonia.Android" />
     <PackageReference Include="Xamarin.AndroidX.Core.SplashScreen" />
     <PackageReference Include="Xamarin.AndroidX.Media" />
+    <PackageReference Include="org.k2fsa.sherpa.onnx.runtime.android-arm64" />
+    <PackageReference Include="org.k2fsa.sherpa.onnx.runtime.android-x64" />
   </ItemGroup>
 
   <ItemGroup>

@@ -7,6 +7,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using ICSharpCode.SharpZipLib.BZip2;
 using ICSharpCode.SharpZipLib.Tar;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using SherpaOnnx;
 
 namespace AlcoRats.Services.Speech;
@@ -27,12 +29,19 @@ public sealed class PiperTtsEngine : ITtsEngine, IDisposable
     };
 
     private readonly string _rootDir;
+    private readonly IAudioPlayer _audioPlayer;
+    private readonly ILogger<PiperTtsEngine> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private OfflineTts? _tts;
     private bool _ready;
 
-    public PiperTtsEngine(string? cacheDirectory = null)
+    public PiperTtsEngine(
+        IAudioPlayer audioPlayer,
+        ILogger<PiperTtsEngine>? logger = null,
+        string? cacheDirectory = null)
     {
+        _audioPlayer = audioPlayer ?? throw new ArgumentNullException(nameof(audioPlayer));
+        _logger = logger ?? NullLogger<PiperTtsEngine>.Instance;
         _rootDir = cacheDirectory
             ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -54,6 +63,12 @@ public sealed class PiperTtsEngine : ITtsEngine, IDisposable
             var modelDir = await EnsureModelAsync(cancellationToken).ConfigureAwait(false);
             _tts = CreateTts(modelDir);
             _ready = true;
+            _logger.LogInformation("Piper TTS initialized from {ModelDir}", modelDir);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Piper TTS initialization failed");
+            throw;
         }
         finally
         {
@@ -93,7 +108,7 @@ public sealed class PiperTtsEngine : ITtsEngine, IDisposable
 
         try
         {
-            await PlatformAudioPlayer.PlayWavAsync(wavPath, cancellationToken).ConfigureAwait(false);
+            await _audioPlayer.PlayWavAsync(wavPath, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -127,6 +142,7 @@ public sealed class PiperTtsEngine : ITtsEngine, IDisposable
         var archivePath = Path.Combine(_rootDir, ModelArchiveName);
         if (!File.Exists(archivePath) || new FileInfo(archivePath).Length < 1_000_000)
         {
+            _logger.LogInformation("Downloading Piper model from {Url}", ModelDownloadUrl);
             var tmp = archivePath + ".partial";
             await using (var response = await Http.GetStreamAsync(ModelDownloadUrl, cancellationToken)
                              .ConfigureAwait(false))
@@ -138,6 +154,7 @@ public sealed class PiperTtsEngine : ITtsEngine, IDisposable
             if (File.Exists(archivePath))
                 File.Delete(archivePath);
             File.Move(tmp, archivePath);
+            _logger.LogInformation("Piper model archive saved to {Path}", archivePath);
         }
 
         Directory.CreateDirectory(extractDir);

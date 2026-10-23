@@ -1,7 +1,9 @@
+using AlcoRats.Hosting;
 using AlcoRats.Services.Speech;
 using Foundation;
 using Avalonia;
 using Avalonia.iOS;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AlcoRats.iOS;
 
@@ -12,8 +14,10 @@ public partial class AppDelegate : AvaloniaAppDelegate<App>
 {
     protected override AppBuilder CustomizeAppBuilder(AppBuilder builder)
     {
-        TtsService.Configure(new CompositeTtsEngine(new PiperTtsEngine()));
-        ParticipantAnnouncer.Start();
+        AppHost.Initialize(services =>
+        {
+            services.AddSingleton<ITtsEngine>(sp => sp.GetRequiredService<PiperTtsEngine>());
+        });
 
         return base.CustomizeAppBuilder(builder)
             .WithInterFont();

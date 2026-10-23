@@ -5,10 +5,14 @@ using System.Text;
 
 namespace AlcoRats.Settings
 {
-    class AppSettings : ObservableObject
+    public class AppSettings
     {
-        public string UserEnter { get; } = "{User}, входит";
+        public string User { get; set; } = "";
 
-        public string UserLeave { get; } = "{User}, выходит";
+        public string Password { get; set; } = "";
+
+        public string UserEnter { get; set; } = "{User}, входит";
+
+        public string UserLeave { get; set; } = "{User}, выходит";
     }
 }

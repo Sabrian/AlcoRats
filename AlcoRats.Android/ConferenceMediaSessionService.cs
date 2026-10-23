@@ -4,8 +4,10 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using AlcoRats.Hosting;
 using AlcoRats.Services;
 using Android.App;
+using Microsoft.Extensions.DependencyInjection;
 using Android.Content;
 using Android.Content.PM;
 using Android.Content.Res;
@@ -44,6 +46,7 @@ public sealed class ConferenceMediaSessionService : Service
 
     private MediaSessionCompat? _session;
     private MediaSessionCallback? _callback;
+    private IConferenceSession? _conference;
     private ConferenceSessionState _lastState = ConferenceSessionState.Inactive;
     private Handler? _mainHandler;
     private bool _micPending;
@@ -84,12 +87,18 @@ public sealed class ConferenceMediaSessionService : Service
         base.OnCreate();
         EnsureNotificationChannel();
         CreateMediaSession();
-        ConferenceSession.StateChanged += OnConferenceStateChanged;
+        _conference = ResolveConferenceSession();
+        if (_conference is not null)
+        {
+            _lastState = _conference.State;
+            _conference.StateChanged += OnConferenceStateChanged;
+        }
     }
 
     public override StartCommandResult OnStartCommand(Intent? intent, StartCommandFlags flags, int startId)
     {
         MediaButtonReceiver.HandleIntent(_session, intent);
+        _conference ??= ResolveConferenceSession();
 
         switch (intent?.Action)
         {
@@ -101,7 +110,7 @@ public sealed class ConferenceMediaSessionService : Service
                 break;
             case ActionLeave:
                 ClearPending(mic: true, cam: true);
-                _ = ConferenceSession.LeaveAsync();
+                _ = _conference?.LeaveAsync();
                 break;
         }
 
@@ -114,7 +123,8 @@ public sealed class ConferenceMediaSessionService : Service
 
     public override void OnDestroy()
     {
-        ConferenceSession.StateChanged -= OnConferenceStateChanged;
+        if (_conference is not null)
+            _conference.StateChanged -= OnConferenceStateChanged;
         ClearPending(mic: true, cam: true);
 
         if (_session is not null)
@@ -143,24 +153,29 @@ public sealed class ConferenceMediaSessionService : Service
             PlayMicStatusTone(microphoneOn: !state.AudioMuted);
     }
 
+    private static IConferenceSession? ResolveConferenceSession()
+        => AppHost.IsInitialized
+            ? AppHost.Services.GetRequiredService<IConferenceSession>()
+            : null;
+
     /// <summary>Shared path for notification button and media hotkeys.</summary>
     private bool TryToggleMicrophone()
     {
-        if (_micPending)
+        if (_micPending || _conference is null)
             return false;
 
         BeginMicPending();
-        _ = ConferenceSession.ToggleMicrophoneAsync();
+        _ = _conference.ToggleMicrophoneAsync();
         return true;
     }
 
     private bool TryToggleCamera()
     {
-        if (_camPending)
+        if (_camPending || _conference is null)
             return false;
 
         BeginCamPending();
-        _ = ConferenceSession.ToggleCameraAsync();
+        _ = _conference.ToggleCameraAsync();
         return true;
     }
 

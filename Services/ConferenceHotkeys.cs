@@ -1,4 +1,6 @@
 using System.Threading.Tasks;
+using AlcoRats.Hosting;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AlcoRats.Services;
 
@@ -8,5 +10,12 @@ namespace AlcoRats.Services;
 public static class ConferenceHotkeys
 {
     public static Task<bool> ToggleMicrophoneAsync()
-        => ConferenceSession.ToggleMicrophoneAsync(debounce: true);
+    {
+        if (!AppHost.IsInitialized)
+            return Task.FromResult(false);
+
+        return AppHost.Services
+            .GetRequiredService<IConferenceSession>()
+            .ToggleMicrophoneAsync(debounce: true);
+    }
 }

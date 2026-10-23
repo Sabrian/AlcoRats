@@ -4,24 +4,29 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AlcoRats.Services.Speech;
 
 /// <summary>
-/// Plays a WAV file using the best available platform mechanism from shared code.
-/// Android overrides via <see cref="PlayHandler"/>.
+/// Default WAV player for Desktop (Windows PlaySound / shell open elsewhere).
 /// </summary>
-public static class PlatformAudioPlayer
+public sealed class PlatformAudioPlayer : IAudioPlayer
 {
-    public static Func<string, CancellationToken, Task>? PlayHandler { get; set; }
+    private readonly ILogger<PlatformAudioPlayer> _logger;
 
-    public static async Task PlayWavAsync(string wavPath, CancellationToken cancellationToken = default)
+    public PlatformAudioPlayer(ILogger<PlatformAudioPlayer>? logger = null)
     {
-        if (PlayHandler is not null)
-        {
-            await PlayHandler(wavPath, cancellationToken).ConfigureAwait(false);
-            return;
-        }
+        _logger = logger ?? NullLogger<PlatformAudioPlayer>.Instance;
+    }
+
+    public async Task PlayWavAsync(string wavPath, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(wavPath) || !File.Exists(wavPath))
+            throw new FileNotFoundException("WAV file not found.", wavPath);
+
+        _logger.LogDebug("Playing WAV: {Path}", wavPath);
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
@@ -29,7 +34,6 @@ public static class PlatformAudioPlayer
             return;
         }
 
-        // Fallback: best-effort OS open (may not wait for completion).
         var psi = new ProcessStartInfo
         {
             FileName = wavPath,
@@ -44,7 +48,6 @@ public static class PlatformAudioPlayer
         return Task.Run(() =>
         {
             cancellationToken.ThrowIfCancellationRequested();
-            // System.Media is Windows-only; use P/Invoke winmm to avoid extra package.
             var result = PlaySound(wavPath, IntPtr.Zero, SndFilename | SndSync | SndNoDefault);
             if (result == 0 && File.Exists(wavPath))
                 throw new InvalidOperationException("PlaySound failed for " + wavPath);

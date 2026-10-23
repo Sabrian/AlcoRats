@@ -2,7 +2,6 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using AlcoRats.Services.Speech;
-using Android.Media;
 using Android.OS;
 using Android.Speech.Tts;
 using Java.Util;
@@ -118,36 +117,5 @@ public sealed class AndroidTextToSpeechEngine : Java.Lang.Object, ITtsEngine, Te
 #pragma warning disable CS0672, CS0618
         public override void OnError(string? utteranceId) => _onDone(utteranceId);
 #pragma warning restore CS0672, CS0618
-    }
-}
-
-/// <summary>
-/// Plays Piper WAV output on Android.
-/// </summary>
-public static class AndroidWavPlayer
-{
-    public static async Task PlayAsync(string path, CancellationToken cancellationToken = default)
-    {
-        var player = new MediaPlayer();
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        player.Completion += (_, _) => done.TrySetResult();
-        player.Error += (_, _) => done.TrySetResult();
-        try
-        {
-            await player.SetDataSourceAsync(path).ConfigureAwait(false);
-            player.Prepare();
-            player.Start();
-            await using var reg = cancellationToken.Register(() =>
-            {
-                try { player.Stop(); } catch { /* ignore */ }
-                done.TrySetCanceled(cancellationToken);
-            });
-            await done.Task.ConfigureAwait(false);
-        }
-        finally
-        {
-            player.Release();
-            player.Dispose();
-        }
     }
 }

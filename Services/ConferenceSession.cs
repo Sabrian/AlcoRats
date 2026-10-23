@@ -1,28 +1,35 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace AlcoRats.Services;
 
 /// <summary>
 /// Cross-platform conference control hub: state from Jitsi WebView + actions from UI/notification/hotkeys.
 /// </summary>
-public static class ConferenceSession
+public sealed class ConferenceSession : IConferenceSession
 {
-    private static readonly SemaphoreSlim Gate = new(1, 1);
-    private static long _lastMicTicks;
+    private readonly ILogger<ConferenceSession> _logger;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private long _lastMicTicks;
 
-    private static Func<Task>? _toggleMicrophoneAsync;
-    private static Func<Task>? _toggleCameraAsync;
-    private static Func<Task>? _leaveAsync;
+    private Func<Task>? _toggleMicrophoneAsync;
+    private Func<Task>? _toggleCameraAsync;
+    private Func<Task>? _leaveAsync;
 
-    private static ConferenceSessionState _state = ConferenceSessionState.Inactive;
+    private ConferenceSessionState _state = ConferenceSessionState.Inactive;
 
-    public static event Action<ConferenceSessionState>? StateChanged;
+    public ConferenceSession(ILogger<ConferenceSession> logger)
+    {
+        _logger = logger;
+    }
 
-    public static ConferenceSessionState State => _state;
+    public event Action<ConferenceSessionState>? StateChanged;
 
-    public static void Register(
+    public ConferenceSessionState State => _state;
+
+    public void Register(
         Func<Task> toggleMicrophoneAsync,
         Func<Task> toggleCameraAsync,
         Func<Task> leaveAsync)
@@ -30,9 +37,10 @@ public static class ConferenceSession
         _toggleMicrophoneAsync = toggleMicrophoneAsync;
         _toggleCameraAsync = toggleCameraAsync;
         _leaveAsync = leaveAsync;
+        _logger.LogInformation("Conference session handlers registered");
     }
 
-    public static void Unregister(
+    public void Unregister(
         Func<Task> toggleMicrophoneAsync,
         Func<Task> toggleCameraAsync,
         Func<Task> leaveAsync)
@@ -45,27 +53,45 @@ public static class ConferenceSession
             _leaveAsync = null;
 
         Publish(ConferenceSessionState.Inactive);
+        _logger.LogInformation("Conference session handlers unregistered");
     }
 
-    public static void Publish(ConferenceSessionState state)
+    public void Publish(ConferenceSessionState state)
     {
+        var previous = _state;
         _state = state;
+        if (previous.IsActive != state.IsActive
+            || previous.AudioMuted != state.AudioMuted
+            || previous.VideoMuted != state.VideoMuted
+            || previous.Participants.Count != state.Participants.Count)
+        {
+            _logger.LogDebug(
+                "Conference state: Active={Active}, AudioMuted={AudioMuted}, VideoMuted={VideoMuted}, Participants={Count}",
+                state.IsActive,
+                state.AudioMuted,
+                state.VideoMuted,
+                state.Participants.Count);
+        }
+
         StateChanged?.Invoke(state);
     }
 
-    public static Task<bool> ToggleMicrophoneAsync(bool debounce = true)
-        => InvokeAsync(_toggleMicrophoneAsync, debounce);
+    public Task<bool> ToggleMicrophoneAsync(bool debounce = true)
+        => InvokeAsync(_toggleMicrophoneAsync, nameof(ToggleMicrophoneAsync), debounce);
 
-    public static Task<bool> ToggleCameraAsync()
-        => InvokeAsync(_toggleCameraAsync, debounce: false);
+    public Task<bool> ToggleCameraAsync()
+        => InvokeAsync(_toggleCameraAsync, nameof(ToggleCameraAsync), debounce: false);
 
-    public static Task<bool> LeaveAsync()
-        => InvokeAsync(_leaveAsync, debounce: false);
+    public Task<bool> LeaveAsync()
+        => InvokeAsync(_leaveAsync, nameof(LeaveAsync), debounce: false);
 
-    private static async Task<bool> InvokeAsync(Func<Task>? handler, bool debounce)
+    private async Task<bool> InvokeAsync(Func<Task>? handler, string action, bool debounce)
     {
         if (handler is null)
+        {
+            _logger.LogWarning("Conference action skipped — handler missing: {Action}", action);
             return false;
+        }
 
         if (debounce)
         {
@@ -75,17 +101,23 @@ public static class ConferenceSession
             Interlocked.Exchange(ref _lastMicTicks, now);
         }
 
-        if (!await Gate.WaitAsync(0).ConfigureAwait(false))
+        if (!await _gate.WaitAsync(0).ConfigureAwait(false))
             return true;
 
         try
         {
+            _logger.LogDebug("Conference action: {Action}", action);
             await handler().ConfigureAwait(false);
             return true;
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Conference action failed: {Action}", action);
+            throw;
+        }
         finally
         {
-            Gate.Release();
+            _gate.Release();
         }
     }
 }

@@ -178,7 +178,7 @@ public class MainActivity : AvaloniaMainActivity
 
     private void OpenAppSettings()
     {
-        var intent = new Intent(Settings.ActionApplicationDetailsSettings);
+        var intent = new Intent(global::Android.Provider.Settings.ActionApplicationDetailsSettings);
         intent.SetData(global::Android.Net.Uri.FromParts("package", PackageName, null));
         intent.AddFlags(ActivityFlags.NewTask);
         StartActivity(intent);

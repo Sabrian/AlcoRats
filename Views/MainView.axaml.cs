@@ -2,12 +2,16 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
+using AlcoRats.Hosting;
 using AlcoRats.Services;
 using AlcoRats.ViewModels;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AlcoRats.Views;
 
@@ -16,6 +20,8 @@ public partial class MainView : UserControl
     private readonly Func<Task> _toggleMicrophoneHandler;
     private readonly Func<Task> _toggleCameraHandler;
     private readonly Func<Task> _leaveHandler;
+    private readonly ILogger<MainView> _logger;
+    private readonly IConferenceSession _conference;
     private bool _pageReady;
     private bool _navigationStarted;
     private bool _bridgeInstalled;
@@ -262,6 +268,17 @@ public partial class MainView : UserControl
     public MainView()
     {
         InitializeComponent();
+        if (AppHost.IsInitialized)
+        {
+            _logger = AppHost.Services.GetRequiredService<ILogger<MainView>>();
+            _conference = AppHost.Services.GetRequiredService<IConferenceSession>();
+        }
+        else
+        {
+            _logger = NullLogger<MainView>.Instance;
+            _conference = null!;
+        }
+
         _toggleMicrophoneHandler = () => RunScriptAsync(ToggleMicScript);
         _toggleCameraHandler = () => RunScriptAsync(ToggleCamScript);
         _leaveHandler = () => RunScriptAsync(LeaveScript);
@@ -273,6 +290,7 @@ public partial class MainView : UserControl
         AttachedToVisualTree += OnAttachedToVisualTree;
         DetachedFromVisualTree += OnDetachedFromVisualTree;
         WebViewPlatformSetup.Apply(RoomWebView);
+        _logger.LogDebug("MainView created");
     }
 
     private void OnAdapterCreated(object? sender, EventArgs e)
@@ -280,9 +298,9 @@ public partial class MainView : UserControl
 
     private void OnAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
-        ConferenceSession.Register(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
-        ConferenceSession.StateChanged += OnConferenceSessionStateChanged;
-        UpdateConferenceActionButton(ConferenceSession.State.IsActive);
+        _conference.Register(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
+        _conference.StateChanged += OnConferenceSessionStateChanged;
+        UpdateConferenceActionButton(_conference.State.IsActive);
         WebViewPlatformSetup.Apply(RoomWebView);
         StartNavigation();
         _ = WatchdogAsync();
@@ -290,8 +308,8 @@ public partial class MainView : UserControl
 
     private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
-        ConferenceSession.StateChanged -= OnConferenceSessionStateChanged;
-        ConferenceSession.Unregister(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
+        _conference.StateChanged -= OnConferenceSessionStateChanged;
+        _conference.Unregister(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
         _bridgeInstalled = false;
     }
 
@@ -318,17 +336,26 @@ public partial class MainView : UserControl
 
     private async void OnConferenceActionClick(object? sender, RoutedEventArgs e)
     {
-        if (_conferenceActive)
+        try
         {
-            // Optimistic UI — bridge will confirm after hangup.
-            UpdateConferenceActionButton(false);
-            ConferenceSession.Publish(ConferenceSessionState.Inactive);
-            SetStatus("Выход из конференции…");
-            await ConferenceSession.LeaveAsync();
-            return;
-        }
+            if (_conferenceActive)
+            {
+                // Optimistic UI — bridge will confirm after hangup.
+                _logger.LogInformation("Leave conference requested from UI");
+                UpdateConferenceActionButton(false);
+                _conference.Publish(ConferenceSessionState.Inactive);
+                SetStatus("Выход из конференции…");
+                await _conference.LeaveAsync();
+                return;
+            }
 
-        NavigateToRoomHome();
+            NavigateToRoomHome();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Conference action button failed");
+            SetStatus("Ошибка: " + ex.Message);
+        }
     }
 
     private void NavigateToRoomHome()
@@ -337,6 +364,7 @@ public partial class MainView : UserControl
         _bridgeInstalled = false;
         _pageReady = false;
         SetStatus("Открытие страницы подключения…");
+        _logger.LogInformation("Navigating to room home: {Url}", url);
 
         try
         {
@@ -344,6 +372,7 @@ public partial class MainView : UserControl
         }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "Navigate to room home failed");
             SetStatus("Ошибка: " + ex.Message);
         }
     }
@@ -356,6 +385,7 @@ public partial class MainView : UserControl
         var url = (DataContext as MainViewModel)?.RoomUrl ?? MainViewModel.DefaultRoomUri;
         _navigationStarted = true;
         SetStatus("Открытие: " + url.Host + "…");
+        _logger.LogInformation("Initial navigation to {Url}", url);
 
         try
         {
@@ -364,6 +394,7 @@ public partial class MainView : UserControl
         }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "Initial navigation failed");
             SetStatus("Ошибка: " + ex.Message);
         }
     }
@@ -380,14 +411,14 @@ public partial class MainView : UserControl
         if (e.IsSuccess)
         {
             SetStatus("Ожидание подключения к конференции…");
-            ConferenceSession.Publish(ConferenceSessionState.Inactive);
+            _conference.Publish(ConferenceSessionState.Inactive);
             UpdateConferenceActionButton(false);
             await InstallBridgeAsync();
         }
         else
         {
             SetStatus("Не удалось загрузить комнату.");
-            ConferenceSession.Publish(ConferenceSessionState.Inactive);
+            _conference.Publish(ConferenceSessionState.Inactive);
             UpdateConferenceActionButton(false);
         }
     }
@@ -440,13 +471,13 @@ public partial class MainView : UserControl
             // Status + notification panel only while actually in the live call.
             if (!active)
             {
-                ConferenceSession.Publish(ConferenceSessionState.Inactive);
+                _conference.Publish(ConferenceSessionState.Inactive);
                 UpdateConferenceActionButton(false);
                 SetStatus("Ожидание подключения к конференции…");
                 return;
             }
 
-            ConferenceSession.Publish(new ConferenceSessionState(true, audioMuted, videoMuted, participants));
+            _conference.Publish(new ConferenceSessionState(true, audioMuted, videoMuted, participants));
             UpdateConferenceActionButton(true);
             SetStatus($"В конференции: {participants.Count}");
         }

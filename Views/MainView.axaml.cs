@@ -97,7 +97,7 @@ public partial class MainView : UserControl
         }
         catch (Exception ex)
         {
-            SetStatus("Ошибка WebView: " + ex.Message);
+            SetStatus("Ошибка: " + ex.Message);
         }
     }
 
@@ -108,8 +108,8 @@ public partial class MainView : UserControl
     {
         _pageReady = e.IsSuccess;
         SetStatus(e.IsSuccess
-            ? "Комната загружена. Play/Pause на гарнитуре — mute микрофона."
-            : "Не удалось загрузить комнату. Проверьте сеть / URL.");
+            ? "Конференция активна"
+            : "Не удалось загрузить комнату.");
     }
 
     private async Task WatchdogAsync()
@@ -121,7 +121,7 @@ public partial class MainView : UserControl
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
             if (!_pageReady)
-                SetStatus("Долгая загрузка или чёрный WebView. Проверьте интернет эмулятора и GPU (SwiftShader).");
+                SetStatus("Ожидание...");
         });
     }
 

@@ -19,7 +19,7 @@
       Avalonia overlays on top of it — they won't be visible on Android.
     -->
     <DockPanel>
-        <Border DockPanel.Dock="Top"
+        <Border DockPanel.Dock="Bottom"
                 Background="#252532"
                 Padding="12,10">
             <TextBlock x:Name="StatusText"

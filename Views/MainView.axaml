@@ -75,9 +75,18 @@
                 </Grid>
             </Border>
 
-            <NativeWebView x:Name="RoomWebView"
-                           HorizontalAlignment="Stretch"
-                           VerticalAlignment="Stretch" />
+            <!-- NativeWebView is created at runtime — WebView2 crashes the XAML previewer. -->
+            <Panel x:Name="WebViewHost"
+                   HorizontalAlignment="Stretch"
+                   VerticalAlignment="Stretch">
+                <Border Background="{DynamicResource AppSurfaceBrush}">
+                    <TextBlock Text="Jitsi"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Opacity="0.45"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                </Border>
+            </Panel>
         </DockPanel>
 
         <Border x:Name="SettingsOverlay"

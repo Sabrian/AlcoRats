@@ -14,6 +14,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Design = Avalonia.Controls.Design;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -35,6 +36,7 @@ public partial class MainView : UserControl
     private bool _settingsOpen;
     private bool _settingsAnimating;
     private readonly TranslateTransform _settingsTransform = new();
+    private NativeWebView RoomWebView = null!;
 
     private const string ToggleMicScript = """
         (function () {
@@ -284,13 +286,17 @@ public partial class MainView : UserControl
         _toggleCameraHandler = () => RunScriptAsync(ToggleCamScript);
         _leaveHandler = () => RunScriptAsync(LeaveScript);
 
-        RoomWebView.NavigationStarted += OnNavigationStarted;
-        RoomWebView.NavigationCompleted += OnNavigationCompleted;
-        RoomWebView.AdapterCreated += OnAdapterCreated;
-        RoomWebView.WebMessageReceived += OnWebMessageReceived;
+        if (RoomWebView is not null)
+        {
+            RoomWebView.NavigationStarted += OnNavigationStarted;
+            RoomWebView.NavigationCompleted += OnNavigationCompleted;
+            RoomWebView.AdapterCreated += OnAdapterCreated;
+            RoomWebView.WebMessageReceived += OnWebMessageReceived;
+            WebViewPlatformSetup.Apply(RoomWebView);
+        }
+
         AttachedToVisualTree += OnAttachedToVisualTree;
         DetachedFromVisualTree += OnDetachedFromVisualTree;
-        WebViewPlatformSetup.Apply(RoomWebView);
         _logger.LogDebug("MainView created");
     }
 
@@ -298,6 +304,21 @@ public partial class MainView : UserControl
     {
         InitializeComponent();
         SettingsOverlay.RenderTransform = _settingsTransform;
+        EnsureRoomWebView();
+    }
+
+    private void EnsureRoomWebView()
+    {
+        if (Design.IsDesignMode)
+            return;
+
+        RoomWebView = new NativeWebView
+        {
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
+            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch
+        };
+        WebViewHost.Children.Clear();
+        WebViewHost.Children.Add(RoomWebView);
     }
 
     private void OnAdapterCreated(object? sender, EventArgs e)

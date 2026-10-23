@@ -28,7 +28,7 @@ namespace AlcoRats.Android;
     Name = "com.alcorats.app.ConferenceMediaSessionService",
     Exported = true,
     ForegroundServiceType = ForegroundService.TypeMediaPlayback | ForegroundService.TypeMicrophone)]
-[IntentFilter([Intent.ActionMediaButton, ActionToggleMic, ActionToggleCam, ActionLeave, ActionRefresh])]
+[IntentFilter([Intent.ActionMediaButton, ActionToggleMic, ActionToggleCam, ActionOpenChat, ActionLeave, ActionRefresh])]
 public sealed class ConferenceMediaSessionService : Service
 {
     public const string ChannelId = "alcorats_conference_hotkeys";
@@ -36,6 +36,7 @@ public sealed class ConferenceMediaSessionService : Service
 
     public const string ActionToggleMic = "com.alcorats.app.ACTION_TOGGLE_MIC";
     public const string ActionToggleCam = "com.alcorats.app.ACTION_TOGGLE_CAM";
+    public const string ActionOpenChat = "com.alcorats.app.ACTION_OPEN_CHAT";
     public const string ActionLeave = "com.alcorats.app.ACTION_LEAVE";
     public const string ActionRefresh = "com.alcorats.app.ACTION_REFRESH";
 
@@ -108,6 +109,9 @@ public sealed class ConferenceMediaSessionService : Service
             case ActionToggleCam:
                 TryToggleCamera();
                 break;
+            case ActionOpenChat:
+                TryOpenChat();
+                break;
             case ActionLeave:
                 ClearPending(mic: true, cam: true);
                 _ = _conference?.LeaveAsync();
@@ -145,12 +149,42 @@ public sealed class ConferenceMediaSessionService : Service
             && _lastState.IsActive
             && state.AudioMuted != _lastState.AudioMuted;
 
+        UpdateChatJoinBaseline(state);
+        var newChatMessage = ShouldPlayIncomingMessageTone(state);
+
         ResolvePendingFromState(state);
         _lastState = state;
         _ = PrefetchAvatarsAndRefreshAsync(state);
 
         if (micChanged)
             PlayMicStatusTone(microphoneOn: !state.AudioMuted);
+
+        if (newChatMessage)
+            PlayIncomingMessageTone();
+    }
+
+    private void UpdateChatJoinBaseline(ConferenceSessionState state)
+    {
+        if (!state.IsActive)
+        {
+            return;
+        }
+
+        if (!_lastState.IsActive)
+        {
+            return;
+        }
+    }
+
+    private bool ShouldPlayIncomingMessageTone(ConferenceSessionState state)
+    {
+        if (!state.IsActive || !_lastState.IsActive)
+            return false;
+
+        if (state.UnreadChatCount <= _lastState.UnreadChatCount)
+            return false;
+
+        return true;
     }
 
     private static IConferenceSession? ResolveConferenceSession()
@@ -177,6 +211,23 @@ public sealed class ConferenceMediaSessionService : Service
         BeginCamPending();
         _ = _conference.ToggleCameraAsync();
         return true;
+    }
+
+    private bool TryOpenChat()
+    {
+        if (_conference is null || !_lastState.IsActive)
+            return false;
+
+        BringAppToForeground();
+        _ = _conference.OpenChatAsync();
+        return true;
+    }
+
+    private void BringAppToForeground()
+    {
+        var launchIntent = new Intent(this, typeof(MainActivity));
+        launchIntent.SetFlags(ActivityFlags.SingleTop | ActivityFlags.ClearTop | ActivityFlags.NewTask);
+        StartActivity(launchIntent);
     }
 
     private Handler MainHandler => _mainHandler ??= new Handler(Looper.MainLooper!);
@@ -362,7 +413,7 @@ public sealed class ConferenceMediaSessionService : Service
             "Конференция",
             NotificationImportance.Default)
         {
-            Description = "Панель конференции: участники, микрофон, камера, выход. Play/Pause — mute."
+            Description = "Панель конференции: участники, микрофон, камера, чат, выход. Play/Pause — mute."
         };
         manager?.CreateNotificationChannel(channel);
     }
@@ -462,9 +513,24 @@ public sealed class ConferenceMediaSessionService : Service
                 : state.VideoMuted
                     ? Resource.Drawable.ic_cam_off
                     : Resource.Drawable.ic_cam);
+        views.SetImageViewResource(Resource.Id.btn_chat, Resource.Drawable.ic_chat);
+
+        if (state.UnreadChatCount > 0)
+        {
+            views.SetViewVisibility(Resource.Id.chat_badge, ViewStates.Visible);
+            views.SetTextViewText(
+                Resource.Id.chat_badge,
+                state.UnreadChatCount > 9 ? "9+" : state.UnreadChatCount.ToString());
+        }
+        else
+        {
+            views.SetViewVisibility(Resource.Id.chat_badge, ViewStates.Gone);
+            views.SetTextViewText(Resource.Id.chat_badge, string.Empty);
+        }
 
         views.SetOnClickPendingIntent(Resource.Id.btn_mic, CreateActionPendingIntent(ActionToggleMic, 11));
         views.SetOnClickPendingIntent(Resource.Id.btn_cam, CreateActionPendingIntent(ActionToggleCam, 12));
+        views.SetOnClickPendingIntent(Resource.Id.btn_chat, CreateActionPendingIntent(ActionOpenChat, 14));
         views.SetOnClickPendingIntent(Resource.Id.btn_leave, CreateActionPendingIntent(ActionLeave, 13));
     }
 
@@ -500,6 +566,73 @@ public sealed class ConferenceMediaSessionService : Service
         });
     }
 
+    private static void PlayIncomingMessageTone()
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                // ~250 ms major arpeggio (E4–G#4–B4–E5) with soft harmonics.
+                PlayPcm(BuildIncomingMessageMelody(durationMs: 250));
+            }
+            catch
+            {
+                // Sonification is best-effort.
+            }
+        });
+    }
+
+    private static short[] BuildIncomingMessageMelody(int durationMs)
+    {
+        const int sampleRate = 22050;
+        var sampleCount = Math.Max(1, sampleRate * durationMs / 1000);
+        var samples = new short[sampleCount];
+
+        // E major arpeggio — consonant and “notification-like”.
+        (double Hz, double Start, double Length, double Gain)[] voices =
+        [
+            (329.63, 0.00, 0.55, 0.22), // E4
+            (415.30, 0.12, 0.55, 0.20), // G#4
+            (493.88, 0.24, 0.55, 0.18), // B4
+            (659.25, 0.38, 0.62, 0.24), // E5
+            (830.61, 0.52, 0.48, 0.10), // G#5 sparkle
+        ];
+
+        for (var i = 0; i < sampleCount; i++)
+        {
+            var t = (double)i / sampleCount;
+            var mix = 0.0;
+
+            foreach (var (hz, start, length, gain) in voices)
+            {
+                if (t < start || t > start + length)
+                    continue;
+
+                var local = (t - start) / length;
+                // Bell-ish envelope: fast attack, smooth decay.
+                var envelope = Math.Sin(Math.PI * Math.Clamp(local, 0, 1));
+                envelope *= envelope;
+                var phase = 2 * Math.PI * hz * i / sampleRate;
+                // Fundamental + quiet octave harmonic for a more melodic timbre.
+                mix += (Math.Sin(phase) + 0.28 * Math.Sin(2 * phase)) * gain * envelope;
+            }
+
+            // Soft overall fade so the whole phrase fits a quarter second cleanly.
+            var master = 1.0;
+            var attack = 0.04;
+            var release = 0.22;
+            if (t < attack)
+                master = t / attack;
+            else if (t > 1.0 - release)
+                master = (1.0 - t) / release;
+
+            var sample = mix * master * short.MaxValue;
+            samples[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
+        }
+
+        return samples;
+    }
+
     private static void PlayTone(double frequencyHz, int durationMs)
     {
         const int sampleRate = 22050;
@@ -520,6 +653,14 @@ public sealed class ConferenceMediaSessionService : Service
             samples[i] = (short)sample;
         }
 
+        PlayPcm(samples);
+    }
+
+    private static void PlayPcm(short[] samples)
+    {
+        const int sampleRate = 22050;
+        var durationMs = Math.Max(1, samples.Length * 1000 / sampleRate);
+
         using var track = new AudioTrack.Builder()
             .SetAudioAttributes(new AudioAttributes.Builder()!
                 .SetUsage(AudioUsageKind.AssistanceSonification)!
@@ -536,7 +677,7 @@ public sealed class ConferenceMediaSessionService : Service
 
         track.Write(samples, 0, samples.Length);
         track.Play();
-        Thread.Sleep(durationMs + 25);
+        Thread.Sleep(durationMs + 20);
         track.Stop();
     }
 

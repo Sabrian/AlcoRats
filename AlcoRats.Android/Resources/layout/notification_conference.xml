@@ -147,6 +147,35 @@
         android:scaleType="centerInside"
         android:src="@drawable/ic_cam" />
 
+    <FrameLayout
+        android:id="@+id/btn_chat_wrap"
+        android:layout_width="40dp"
+        android:layout_height="40dp">
+
+        <ImageButton
+            android:id="@+id/btn_chat"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Сообщения"
+            android:padding="8dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_chat" />
+
+        <TextView
+            android:id="@+id/chat_badge"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:layout_gravity="top|end"
+            android:background="@drawable/bg_chat_badge"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:textColor="#FFFFFF"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+    </FrameLayout>
+
     <ImageButton
         android:id="@+id/btn_leave"
         android:layout_width="40dp"

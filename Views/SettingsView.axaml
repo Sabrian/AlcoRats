@@ -58,6 +58,14 @@
                 </StackPanel>
 
                 <StackPanel Spacing="6">
+                    <TextBlock Text="Пароль комнаты"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                    <TextBox Text="{Binding RoomPassword}"
+                             PasswordChar="•"
+                             PlaceholderText="Пароль защищённой комнаты Jitsi" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
                     <TextBlock Text="Вход пользователя"
                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
                     <TextBox Text="{Binding UserEnter}"

@@ -17,6 +17,7 @@ public sealed class ConferenceSession : IConferenceSession
     private Func<Task>? _toggleMicrophoneAsync;
     private Func<Task>? _toggleCameraAsync;
     private Func<Task>? _leaveAsync;
+    private Func<Task>? _openChatAsync;
 
     private ConferenceSessionState _state = ConferenceSessionState.Inactive;
 
@@ -32,18 +33,21 @@ public sealed class ConferenceSession : IConferenceSession
     public void Register(
         Func<Task> toggleMicrophoneAsync,
         Func<Task> toggleCameraAsync,
-        Func<Task> leaveAsync)
+        Func<Task> leaveAsync,
+        Func<Task> openChatAsync)
     {
         _toggleMicrophoneAsync = toggleMicrophoneAsync;
         _toggleCameraAsync = toggleCameraAsync;
         _leaveAsync = leaveAsync;
+        _openChatAsync = openChatAsync;
         _logger.LogInformation("Conference session handlers registered");
     }
 
     public void Unregister(
         Func<Task> toggleMicrophoneAsync,
         Func<Task> toggleCameraAsync,
-        Func<Task> leaveAsync)
+        Func<Task> leaveAsync,
+        Func<Task> openChatAsync)
     {
         if (ReferenceEquals(_toggleMicrophoneAsync, toggleMicrophoneAsync))
             _toggleMicrophoneAsync = null;
@@ -51,6 +55,8 @@ public sealed class ConferenceSession : IConferenceSession
             _toggleCameraAsync = null;
         if (ReferenceEquals(_leaveAsync, leaveAsync))
             _leaveAsync = null;
+        if (ReferenceEquals(_openChatAsync, openChatAsync))
+            _openChatAsync = null;
 
         Publish(ConferenceSessionState.Inactive);
         _logger.LogInformation("Conference session handlers unregistered");
@@ -63,14 +69,16 @@ public sealed class ConferenceSession : IConferenceSession
         if (previous.IsActive != state.IsActive
             || previous.AudioMuted != state.AudioMuted
             || previous.VideoMuted != state.VideoMuted
-            || previous.Participants.Count != state.Participants.Count)
+            || previous.Participants.Count != state.Participants.Count
+            || previous.UnreadChatCount != state.UnreadChatCount)
         {
             _logger.LogDebug(
-                "Conference state: Active={Active}, AudioMuted={AudioMuted}, VideoMuted={VideoMuted}, Participants={Count}",
+                "Conference state: Active={Active}, AudioMuted={AudioMuted}, VideoMuted={VideoMuted}, Participants={Count}, UnreadChat={Unread}",
                 state.IsActive,
                 state.AudioMuted,
                 state.VideoMuted,
-                state.Participants.Count);
+                state.Participants.Count,
+                state.UnreadChatCount);
         }
 
         StateChanged?.Invoke(state);
@@ -84,6 +92,9 @@ public sealed class ConferenceSession : IConferenceSession
 
     public Task<bool> LeaveAsync()
         => InvokeAsync(_leaveAsync, nameof(LeaveAsync), debounce: false);
+
+    public Task<bool> OpenChatAsync()
+        => InvokeAsync(_openChatAsync, nameof(OpenChatAsync), debounce: false);
 
     private async Task<bool> InvokeAsync(Func<Task>? handler, string action, bool debounce)
     {

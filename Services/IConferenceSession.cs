@@ -9,9 +9,17 @@ public interface IConferenceSession
 
     event Action<ConferenceSessionState>? StateChanged;
 
-    void Register(Func<Task> toggleMicrophoneAsync, Func<Task> toggleCameraAsync, Func<Task> leaveAsync);
+    void Register(
+        Func<Task> toggleMicrophoneAsync,
+        Func<Task> toggleCameraAsync,
+        Func<Task> leaveAsync,
+        Func<Task> openChatAsync);
 
-    void Unregister(Func<Task> toggleMicrophoneAsync, Func<Task> toggleCameraAsync, Func<Task> leaveAsync);
+    void Unregister(
+        Func<Task> toggleMicrophoneAsync,
+        Func<Task> toggleCameraAsync,
+        Func<Task> leaveAsync,
+        Func<Task> openChatAsync);
 
     void Publish(ConferenceSessionState state);
 
@@ -20,4 +28,6 @@ public interface IConferenceSession
     Task<bool> ToggleCameraAsync();
 
     Task<bool> LeaveAsync();
+
+    Task<bool> OpenChatAsync();
 }

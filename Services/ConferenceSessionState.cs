@@ -6,8 +6,9 @@ public sealed record ConferenceSessionState(
     bool IsActive,
     bool AudioMuted,
     bool VideoMuted,
-    IReadOnlyList<ConferenceParticipant> Participants)
+    IReadOnlyList<ConferenceParticipant> Participants,
+    int UnreadChatCount = 0)
 {
     public static ConferenceSessionState Inactive { get; } =
-        new(false, false, false, []);
+        new(false, false, false, [], 0);
 }

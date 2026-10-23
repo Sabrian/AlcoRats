@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
 using AlcoRats.Hosting;
-using AlcoRats.Mapping;
 using AlcoRats.Services;
 using AlcoRats.Settings;
 using AlcoRats.ViewModels;
@@ -12,6 +11,7 @@ using Avalonia.Animation;
 using Avalonia.Animation.Easings;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Design = Avalonia.Controls.Design;
@@ -26,6 +26,7 @@ public partial class MainView : UserControl
     private readonly Func<Task> _toggleMicrophoneHandler;
     private readonly Func<Task> _toggleCameraHandler;
     private readonly Func<Task> _leaveHandler;
+    private readonly Func<Task> _openChatHandler;
     private readonly ILogger<MainView> _logger;
     private readonly IConferenceSession _conference;
     private readonly AppSettings _settings;
@@ -112,12 +113,47 @@ public partial class MainView : UserControl
         })()
         """;
 
+    private const string OpenChatScript = """
+        (function () {
+          try {
+            if (typeof APP !== 'undefined' && APP.store && typeof APP.store.dispatch === 'function') {
+              var chat = (APP.store.getState()['features/chat'] || {});
+              if (chat.isOpen) {
+                if (typeof window.__alcoRatsPublishConference === 'function')
+                  setTimeout(window.__alcoRatsPublishConference, 80);
+                return 'open';
+              }
+              try { APP.store.dispatch({ type: 'OPEN_CHAT' }); } catch (e1) {
+                try { APP.store.dispatch({ type: 'TOGGLE_CHAT' }); } catch (e2) {}
+              }
+              if (typeof window.__alcoRatsPublishConference === 'function')
+                setTimeout(window.__alcoRatsPublishConference, 120);
+              return 'ok';
+            }
+          } catch (e) {}
+          try {
+            var nodes = document.querySelectorAll('[aria-label], [data-testid], button');
+            for (var i = 0; i < nodes.length; i++) {
+              var label = ((nodes[i].getAttribute('aria-label') || '') + ' ' + (nodes[i].getAttribute('data-testid') || '') + ' ' + (nodes[i].textContent || '')).toLowerCase();
+              if (label.indexOf('chat') >= 0 || label.indexOf('чат') >= 0 || label.indexOf('message') >= 0 || label.indexOf('сообщ') >= 0) {
+                nodes[i].click();
+                if (typeof window.__alcoRatsPublishConference === 'function')
+                  setTimeout(window.__alcoRatsPublishConference, 120);
+                return 'dom';
+              }
+            }
+          } catch (e) {}
+          return 'fail';
+        })()
+        """;
+
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 4) return 'exists';
-          window.__alcoRatsBridgeVersion = 4;
+          if (window.__alcoRatsBridgeVersion === 6) return 'exists';
+          window.__alcoRatsBridgeVersion = 6;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
+          if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
 
           function addParticipant(byId, p, isLocal) {
             if (!p || typeof p !== 'object') return;
@@ -180,8 +216,49 @@ public partial class MainView : UserControl
             }
           }
 
+          function getUnreadChatCount(state) {
+            try {
+              var chat = state['features/chat'] || {};
+              if (typeof chat.nbUnreadMessages === 'number')
+                return Math.max(0, chat.nbUnreadMessages | 0);
+              if (chat.isOpen)
+                return 0;
+
+              var messages = chat.messages || [];
+              if (!messages.length)
+                return 0;
+
+              var lastRead = chat.lastReadMessage;
+              var lastReadIndex = -1;
+              if (lastRead) {
+                lastReadIndex = messages.lastIndexOf(lastRead);
+                if (lastReadIndex < 0) {
+                  for (var i = messages.length - 1; i >= 0; i--) {
+                    var m = messages[i];
+                    if (!m) continue;
+                    if ((lastRead.messageId && m.messageId === lastRead.messageId)
+                      || (lastRead.id && m.id === lastRead.id)
+                      || (lastRead.timestamp && m.timestamp === lastRead.timestamp && m.message === lastRead.message)) {
+                      lastReadIndex = i;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              var reactionMessages = 0;
+              for (var j = lastReadIndex + 1; j < messages.length; j++) {
+                if (messages[j] && messages[j].isReaction)
+                  reactionMessages++;
+              }
+              return Math.max(0, messages.length - (lastReadIndex + 1) - reactionMessages);
+            } catch (e) {
+              return 0;
+            }
+          }
+
           function collect() {
-            var out = { active: false, audioMuted: false, videoMuted: false, participants: [] };
+            var out = { active: false, audioMuted: false, videoMuted: false, unreadMessages: 0, participants: [] };
             try {
               if (typeof APP === 'undefined') return out;
 
@@ -200,6 +277,7 @@ public partial class MainView : UserControl
               var byId = {};
               if (APP.store && typeof APP.store.getState === 'function') {
                 var state = APP.store.getState();
+                out.unreadMessages = getUnreadChatCount(state);
                 var pstate = state['features/base/participants'];
                 if (pstate && typeof pstate === 'object') {
                   addParticipant(byId, pstate.local, true);
@@ -269,9 +347,75 @@ public partial class MainView : UserControl
             } catch (e) {}
           }
 
+          function setInputValue(input, value) {
+            if (!input) return;
+            try {
+              var proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+              var descriptor = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+              if (descriptor && descriptor.set)
+                descriptor.set.call(input, value);
+              else
+                input.value = value;
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            } catch (e) {
+              try { input.value = value; } catch (e2) {}
+            }
+          }
+
+          function findRoomPasswordInput() {
+            return document.querySelector('input[name="lockKey"]')
+              || document.querySelector('#passwordRequiredInput')
+              || document.querySelector('input[type="password"]');
+          }
+
+          function fillRoomPasswordIfNeeded() {
+            try {
+              var password = window.__alcoRatsRoomPassword;
+              if (!password) return;
+              var input = findRoomPasswordInput();
+              if (!input) return;
+              // Only fill while the dialog field is empty / not yet matching saved password.
+              if (input.value === password) return;
+              setInputValue(input, password);
+            } catch (e) {}
+          }
+
           window.__alcoRatsPublishConference = publish;
+          window.__alcoRatsFillRoomPassword = fillRoomPasswordIfNeeded;
           window.__alcoRatsBridgeTimer = setInterval(publish, 1500);
+          window.__alcoRatsPasswordTimer = setInterval(fillRoomPasswordIfNeeded, 400);
           setTimeout(publish, 300);
+          setTimeout(fillRoomPasswordIfNeeded, 200);
+
+          if (typeof APP !== 'undefined' && APP.store && typeof APP.store.subscribe === 'function'
+              && !window.__alcoRatsChatSubscribed) {
+            window.__alcoRatsChatSubscribed = true;
+            var lastUnread = -1;
+            APP.store.subscribe(function () {
+              try {
+                var next = collect();
+                if (next.unreadMessages !== lastUnread) {
+                  lastUnread = next.unreadMessages;
+                  publish();
+                }
+                fillRoomPasswordIfNeeded();
+              } catch (e) {}
+            });
+          }
+
+          try {
+            if (!window.__alcoRatsPasswordObserver) {
+              window.__alcoRatsPasswordObserver = new MutationObserver(function () {
+                fillRoomPasswordIfNeeded();
+              });
+              window.__alcoRatsPasswordObserver.observe(document.documentElement || document.body, {
+                childList: true,
+                subtree: true
+              });
+            }
+          } catch (e) {}
+
           return 'ok';
         })()
         """;
@@ -285,6 +429,7 @@ public partial class MainView : UserControl
         _toggleMicrophoneHandler = () => RunScriptAsync(ToggleMicScript);
         _toggleCameraHandler = () => RunScriptAsync(ToggleCamScript);
         _leaveHandler = () => RunScriptAsync(LeaveScript);
+        _openChatHandler = () => RunScriptAsync(OpenChatScript);
 
         if (RoomWebView is not null)
         {
@@ -326,7 +471,11 @@ public partial class MainView : UserControl
 
     private void OnAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
-        _conference.Register(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
+        _conference.Register(
+            _toggleMicrophoneHandler,
+            _toggleCameraHandler,
+            _leaveHandler,
+            _openChatHandler);
         _conference.StateChanged += OnConferenceSessionStateChanged;
         UpdateConferenceActionButton(_conference.State.IsActive);
         WebViewPlatformSetup.Apply(RoomWebView);
@@ -337,7 +486,11 @@ public partial class MainView : UserControl
     private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
         _conference.StateChanged -= OnConferenceSessionStateChanged;
-        _conference.Unregister(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
+        _conference.Unregister(
+            _toggleMicrophoneHandler,
+            _toggleCameraHandler,
+            _leaveHandler,
+            _openChatHandler);
         _bridgeInstalled = false;
     }
 
@@ -371,7 +524,7 @@ public partial class MainView : UserControl
         catch (Exception ex)
         {
             _logger.LogError(ex, "Conference action button failed");
-            SetStatus("Ошибка: " + ex.Message);
+            SetStatus(new TextBlock { Text = "Ошибка: " + ex.Message });
         }
     }
 
@@ -384,7 +537,7 @@ public partial class MainView : UserControl
         catch (Exception ex)
         {
             _logger.LogError(ex, "Open settings failed");
-            SetStatus("Ошибка: " + ex.Message);
+            SetStatus(new TextBlock { Text = "Ошибка: " + ex.Message });
         }
     }
 
@@ -397,7 +550,7 @@ public partial class MainView : UserControl
         catch (Exception ex)
         {
             _logger.LogError(ex, "Close settings failed");
-            SetStatus("Ошибка: " + ex.Message);
+            SetStatus(new TextBlock { Text = "Ошибка: " + ex.Message });
         }
     }
 
@@ -409,9 +562,7 @@ public partial class MainView : UserControl
         _settingsAnimating = true;
         try
         {
-            var vm = SettingsPage.DataContext as SettingsViewModel ?? new SettingsViewModel(_settings);
-            MapperConfig.Mapper.Map(_settings, vm);
-            SettingsPage.DataContext = vm;
+            SettingsPage.DataContext = new SettingsViewModel(_settings);
 
             // Native WebView sits above Avalonia and can steal IME focus on Android.
             SetWebViewActive(false);
@@ -459,6 +610,7 @@ public partial class MainView : UserControl
             _settingsTransform.X = 0;
             SetWebViewActive(true);
             _settingsOpen = false;
+            await PushRoomPasswordAsync();
         }
         finally
         {
@@ -505,17 +657,18 @@ public partial class MainView : UserControl
         var url = ResolveRoomUrl();
         _bridgeInstalled = false;
         _pageReady = false;
-        SetStatus("Открытие страницы подключения…");
+        SetStatus(new TextBlock { Text = "Открытие страницы подключения…" });
         _logger.LogInformation("Navigating to room home: {Url}", url);
 
         try
         {
+            RoomWebView.Source = url;
             RoomWebView.Navigate(url);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Navigate to room home failed");
-            SetStatus("Ошибка: " + ex.Message);
+            SetStatus(new TextBlock { Text = "Ошибка: " + ex.Message });
         }
     }
 
@@ -526,7 +679,7 @@ public partial class MainView : UserControl
 
         var url = ResolveRoomUrl();
         _navigationStarted = true;
-        SetStatus("Открытие: " + url.Host + "…");
+        SetStatus(new TextBlock { Text = "Открытие: " + url.Host + "…" });
         _logger.LogInformation("Initial navigation to {Url}", url);
 
         try
@@ -537,7 +690,7 @@ public partial class MainView : UserControl
         catch (Exception ex)
         {
             _logger.LogError(ex, "Initial navigation failed");
-            SetStatus("Ошибка: " + ex.Message);
+            SetStatus(new TextBlock { Text = "Ошибка: " + ex.Message });
         }
     }
 
@@ -592,7 +745,7 @@ public partial class MainView : UserControl
     private void OnNavigationStarted(object? sender, WebViewNavigationEventArgs e)
     {
         _bridgeInstalled = false;
-        SetStatus("Загрузка страницы…");
+        SetStatus(new TextBlock { Text = "Загрузка страницы…" });
     }
 
     private async void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
@@ -600,14 +753,15 @@ public partial class MainView : UserControl
         _pageReady = e.IsSuccess;
         if (e.IsSuccess)
         {
-            SetStatus("Ожидание подключения к конференции…");
+            SetStatus(new TextBlock { Text = "Ожидание подключения к конференции…" });
             _conference.Publish(ConferenceSessionState.Inactive);
             UpdateConferenceActionButton(false);
             await InstallBridgeAsync();
+            await PushRoomPasswordAsync();
         }
         else
         {
-            SetStatus("Не удалось загрузить комнату.");
+            SetStatus(new TextBlock { Text = "Не удалось загрузить комнату." });
             _conference.Publish(ConferenceSessionState.Inactive);
             UpdateConferenceActionButton(false);
         }
@@ -630,6 +784,28 @@ public partial class MainView : UserControl
         }
     }
 
+    private async Task PushRoomPasswordAsync()
+    {
+        if (!_pageReady || RoomWebView is null)
+            return;
+
+        var password = _settings.RoomPassword ?? string.Empty;
+        var escaped = JsonSerializer.Serialize(password);
+        var script =
+            $"(function(){{ window.__alcoRatsRoomPassword = {escaped}; " +
+            "if (typeof window.__alcoRatsFillRoomPassword === 'function') window.__alcoRatsFillRoomPassword(); " +
+            "return 'ok'; }})()";
+
+        try
+        {
+            await RoomWebView.InvokeScript(script);
+        }
+        catch
+        {
+            // WebView may not be ready yet.
+        }
+    }
+
     private void OnWebMessageReceived(object? sender, WebMessageReceivedEventArgs e)
     {
         if (string.IsNullOrWhiteSpace(e.Body))
@@ -642,6 +818,9 @@ public partial class MainView : UserControl
             var active = root.TryGetProperty("active", out var a) && a.GetBoolean();
             var audioMuted = root.TryGetProperty("audioMuted", out var am) && am.GetBoolean();
             var videoMuted = root.TryGetProperty("videoMuted", out var vm) && vm.GetBoolean();
+            var unreadMessages = root.TryGetProperty("unreadMessages", out var um) && um.ValueKind == JsonValueKind.Number
+                ? um.GetInt32()
+                : 0;
             var participants = new List<ConferenceParticipant>();
 
             if (active
@@ -663,13 +842,14 @@ public partial class MainView : UserControl
             {
                 _conference.Publish(ConferenceSessionState.Inactive);
                 UpdateConferenceActionButton(false);
-                SetStatus("Ожидание подключения к конференции…");
+                SetStatus(new TextBlock { Text = "Ожидание подключения к конференции…" });
                 return;
             }
 
-            _conference.Publish(new ConferenceSessionState(true, audioMuted, videoMuted, participants));
+            _conference.Publish(new ConferenceSessionState(true, audioMuted, videoMuted, participants, Math.Max(0, unreadMessages)));
             UpdateConferenceActionButton(true);
-            SetStatus($"В конференции: {participants.Count}");
+            // Factory so Grid/TextBox are created on the UI thread.
+            SetStatus((Func<object>)(() => CreateConferenceStatusGrid(participants.Count, unreadMessages)));
         }
         catch
         {
@@ -683,23 +863,82 @@ public partial class MainView : UserControl
         if (_pageReady)
         {
             if (!_bridgeInstalled)
+            {
                 await InstallBridgeAsync();
+                await PushRoomPasswordAsync();
+            }
             return;
         }
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
             if (!_pageReady)
-                SetStatus("Ожидание...");
+                SetStatus(new TextBlock { Text = "Ожидание..." });
         });
     }
 
-    private void SetStatus(string text)
+    private static Grid CreateConferenceStatusGrid(int participantsCount, int unreadMessages)
     {
+        var participantsLabel = new TextBlock
+        {
+            Text = "Участников:",
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Grid.SetColumn(participantsLabel, 0);
+
+        var participantsEdit = new TextBox
+        {
+            Text = participantsCount.ToString(),
+            IsHitTestVisible = false,
+            IsReadOnly = true,
+            MinWidth = 50,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        Grid.SetColumn(participantsEdit, 1);
+
+        var messagesLabel = new TextBlock
+        {
+            Text = "Сообщений:",
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Grid.SetColumn(messagesLabel, 2);
+
+        var messagesEdit = new TextBox
+        {
+            Text = unreadMessages.ToString(),
+            IsHitTestVisible = false,
+            IsReadOnly = true,
+            MinWidth = 50,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center
+            
+        };
+        Grid.SetColumn(messagesEdit, 3);
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,*")
+        };
+        grid.Children.Add(participantsLabel);
+        grid.Children.Add(participantsEdit);
+        grid.Children.Add(messagesLabel);
+        grid.Children.Add(messagesEdit);
+        return grid;
+    }
+
+    private void SetStatus(object content)
+    {
+        void Apply()
+        {
+            // Build visual tree on the UI thread when a factory is provided.
+            StatusContent.Content = content is Func<object> factory ? factory() : content;
+        }
+
         if (Dispatcher.UIThread.CheckAccess())
-            StatusText.Text = text;
+            Apply();
         else
-            Dispatcher.UIThread.Post(() => StatusText.Text = text);
+            Dispatcher.UIThread.Post(Apply);
     }
 
     private async Task RunScriptAsync(string script)

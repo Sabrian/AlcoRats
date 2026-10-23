@@ -19,9 +19,11 @@ public class AppSettings
 
     public string Password { get; set; } = "";
 
-    public string UserEnter { get; set; } = "{User}, входит";
+    public string RoomPassword { get; set; } = "1992";
 
-    public string UserLeave { get; set; } = "{User}, выходит";
+    public string UserEnter { get; set; } = "{User}, закотился";
+
+    public string UserLeave { get; set; } = "{User}, выкатился";
 
     public bool ToolbarAlwaysVisible { get; set; } = true;
 

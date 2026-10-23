@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading.Tasks;
 using AlcoRats.Services;
 using AlcoRats.ViewModels;
@@ -11,8 +13,11 @@ namespace AlcoRats.Views;
 public partial class MainView : UserControl
 {
     private readonly Func<Task> _toggleMicrophoneHandler;
+    private readonly Func<Task> _toggleCameraHandler;
+    private readonly Func<Task> _leaveHandler;
     private bool _pageReady;
     private bool _navigationStarted;
+    private bool _bridgeInstalled;
 
     private const string ToggleMicScript = """
         (function () {
@@ -20,48 +25,203 @@ public partial class MainView : UserControl
             if (typeof APP !== 'undefined' && APP.conference) {
               if (typeof APP.conference.toggleAudioMuted === 'function') {
                 APP.conference.toggleAudioMuted();
-                return 'app-toggle';
+                return 'ok';
               }
               if (typeof APP.conference.muteAudio === 'function') {
                 var muted = typeof APP.conference.isLocalAudioMuted === 'function'
                   && APP.conference.isLocalAudioMuted();
                 APP.conference.muteAudio(!muted);
-                return 'app-mute';
+                return 'ok';
               }
             }
           } catch (e) {}
+          return 'fail';
+        })()
+        """;
 
+    private const string ToggleCamScript = """
+        (function () {
+          try {
+            if (typeof APP !== 'undefined' && APP.conference) {
+              if (typeof APP.conference.toggleVideoMuted === 'function') {
+                APP.conference.toggleVideoMuted();
+                return 'ok';
+              }
+              if (typeof APP.conference.muteVideo === 'function') {
+                var muted = typeof APP.conference.isLocalVideoMuted === 'function'
+                  && APP.conference.isLocalVideoMuted();
+                APP.conference.muteVideo(!muted);
+                return 'ok';
+              }
+            }
+          } catch (e) {}
+          return 'fail';
+        })()
+        """;
+
+    private const string LeaveScript = """
+        (function () {
+          try {
+            if (typeof APP !== 'undefined' && APP.conference && typeof APP.conference.hangup === 'function') {
+              APP.conference.hangup();
+              return 'ok';
+            }
+          } catch (e) {}
           try {
             var nodes = document.querySelectorAll('[aria-label], [data-testid]');
             for (var i = 0; i < nodes.length; i++) {
-              var el = nodes[i];
-              var label = ((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('data-testid') || '')).toLowerCase();
-              if (label.indexOf('microphone') >= 0 || label.indexOf('микрофон') >= 0 || label.indexOf('audio.btn') >= 0) {
-                el.click();
+              var label = ((nodes[i].getAttribute('aria-label') || '') + ' ' + (nodes[i].getAttribute('data-testid') || '')).toLowerCase();
+              if (label.indexOf('leave') >= 0 || label.indexOf('hangup') >= 0 || label.indexOf('покинуть') >= 0 || label.indexOf('заверш') >= 0) {
+                nodes[i].click();
                 return 'dom';
               }
             }
           } catch (e) {}
-
-          try {
-            var target = document.activeElement || document.body || document.documentElement;
-            target.dispatchEvent(new KeyboardEvent('keydown', {
-              key: 'm', code: 'KeyM', keyCode: 77, which: 77, bubbles: true, cancelable: true
-            }));
-            return 'key';
-          } catch (e) {}
-
           return 'fail';
+        })()
+        """;
+
+    private const string BridgeScript = """
+        (function () {
+          // Bump version to reinstall after fixes.
+          if (window.__alcoRatsBridgeVersion === 2) return 'exists';
+          window.__alcoRatsBridgeVersion = 2;
+          if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
+
+          function addParticipant(byId, p, isLocal) {
+            if (!p || typeof p !== 'object') return;
+            var id = p.id != null ? String(p.id) : null;
+            if (!id) return;
+            byId[id] = {
+              id: id,
+              name: p.name || p.displayName || (isLocal || p.local ? 'Вы' : 'Участник'),
+              avatar: p.avatarURL || p.avatarUrl || '',
+              local: !!(isLocal || p.local)
+            };
+          }
+
+          function eachMapLike(mapLike, fn) {
+            if (!mapLike) return;
+            if (typeof mapLike.forEach === 'function') {
+              mapLike.forEach(function (value, key) { fn(value, key); });
+              return;
+            }
+            if (typeof mapLike === 'object') {
+              Object.keys(mapLike).forEach(function (key) { fn(mapLike[key], key); });
+            }
+          }
+
+          function collect() {
+            var out = { active: false, audioMuted: false, videoMuted: false, participants: [] };
+            try {
+              if (typeof APP === 'undefined') return out;
+
+              if (APP.conference) {
+                if (typeof APP.conference.isJoined === 'function')
+                  out.active = !!APP.conference.isJoined();
+                else if (APP.conference._room)
+                  out.active = true;
+
+                if (typeof APP.conference.isLocalAudioMuted === 'function')
+                  out.audioMuted = !!APP.conference.isLocalAudioMuted();
+                if (typeof APP.conference.isLocalVideoMuted === 'function')
+                  out.videoMuted = !!APP.conference.isLocalVideoMuted();
+              }
+
+              var byId = {};
+              if (APP.store && typeof APP.store.getState === 'function') {
+                var state = APP.store.getState();
+                var pstate = state['features/base/participants'];
+                if (pstate && typeof pstate === 'object') {
+                  // Modern Jitsi: local participant object + remote Map.
+                  addParticipant(byId, pstate.local, true);
+                  eachMapLike(pstate.remote, function (p) { addParticipant(byId, p, false); });
+
+                  // Older flat shape fallback (id -> participant).
+                  Object.keys(pstate).forEach(function (key) {
+                    if (key === 'local' || key === 'localScreenShare' || key === 'remote'
+                      || key === 'sortedRemoteParticipants' || key === 'sortedRemoteVirtualScreenshareParticipants'
+                      || key === 'fakeParticipants' || key === 'overlaying' || key === 'raisedHandsQueue'
+                      || key === 'risingHandQueue' || key === 'activeSpeakers' || key === 'dominantSpeaker'
+                      || key === 'pinnedParticipant' || key === 'overwrittenNameList'
+                      || key === 'numberOfNonModeratorParticipants' || key === 'numberOfParticipantsDisabledE2EE'
+                      || key === 'numberOfParticipantsNotSupportingE2EE' || key === 'remoteVideoSources')
+                      return;
+                    addParticipant(byId, pstate[key], false);
+                  });
+                }
+              }
+
+              if (Object.keys(byId).length === 0 && APP.conference && typeof APP.conference.listMembers === 'function') {
+                try {
+                  APP.conference.listMembers().forEach(function (m) {
+                    if (!m) return;
+                    var id = String(m.id || (m.getId && m.getId()) || Math.random());
+                    byId[id] = {
+                      id: id,
+                      name: (m.displayName || m.name || (m.getDisplayName && m.getDisplayName()) || 'Участник'),
+                      avatar: (m.avatar || m.avatarUrl || ''),
+                      local: !!(m.local || (APP.conference.getMyUserId && m.id === APP.conference.getMyUserId()))
+                    };
+                  });
+                } catch (e) {}
+              }
+
+              // lib-jitsi-meet room participants
+              if (Object.keys(byId).length <= 1 && APP.conference && APP.conference._room) {
+                try {
+                  var room = APP.conference._room;
+                  if (typeof room.myUserId === 'function') {
+                    var myId = String(room.myUserId());
+                    if (!byId[myId]) {
+                      byId[myId] = { id: myId, name: 'Вы', avatar: '', local: true };
+                    }
+                  }
+                  var parts = room.participants || {};
+                  Object.keys(parts).forEach(function (id) {
+                    var p = parts[id];
+                    if (!p) return;
+                    byId[String(id)] = {
+                      id: String(id),
+                      name: (p._displayName || p.getDisplayName && p.getDisplayName() || 'Участник'),
+                      avatar: '',
+                      local: false
+                    };
+                  });
+                } catch (e) {}
+              }
+
+              out.participants = Object.keys(byId).map(function (k) { return byId[k]; });
+              if (out.participants.length > 0) out.active = true;
+            } catch (e) {}
+            return out;
+          }
+
+          function publish() {
+            try {
+              if (typeof invokeCSharpAction === 'function')
+                invokeCSharpAction(JSON.stringify(collect()));
+            } catch (e) {}
+          }
+
+          window.__alcoRatsPublishConference = publish;
+          window.__alcoRatsBridgeTimer = setInterval(publish, 1500);
+          setTimeout(publish, 300);
+          return 'ok';
         })()
         """;
 
     public MainView()
     {
         InitializeComponent();
-        _toggleMicrophoneHandler = ToggleMicrophoneCoreAsync;
+        _toggleMicrophoneHandler = () => RunScriptAsync(ToggleMicScript);
+        _toggleCameraHandler = () => RunScriptAsync(ToggleCamScript);
+        _leaveHandler = () => RunScriptAsync(LeaveScript);
+
         RoomWebView.NavigationStarted += OnNavigationStarted;
         RoomWebView.NavigationCompleted += OnNavigationCompleted;
         RoomWebView.AdapterCreated += OnAdapterCreated;
+        RoomWebView.WebMessageReceived += OnWebMessageReceived;
         AttachedToVisualTree += OnAttachedToVisualTree;
         DetachedFromVisualTree += OnDetachedFromVisualTree;
         WebViewPlatformSetup.Apply(RoomWebView);
@@ -72,14 +232,17 @@ public partial class MainView : UserControl
 
     private void OnAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
-        ConferenceHotkeys.Register(_toggleMicrophoneHandler);
+        ConferenceSession.Register(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
         WebViewPlatformSetup.Apply(RoomWebView);
         StartNavigation();
         _ = WatchdogAsync();
     }
 
     private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
-        => ConferenceHotkeys.Unregister(_toggleMicrophoneHandler);
+    {
+        ConferenceSession.Unregister(_toggleMicrophoneHandler, _toggleCameraHandler, _leaveHandler);
+        _bridgeInstalled = false;
+    }
 
     private void StartNavigation()
     {
@@ -102,21 +265,84 @@ public partial class MainView : UserControl
     }
 
     private void OnNavigationStarted(object? sender, WebViewNavigationEventArgs e)
-        => SetStatus("Загрузка страницы…");
+    {
+        _bridgeInstalled = false;
+        SetStatus("Загрузка страницы…");
+    }
 
-    private void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
+    private async void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
     {
         _pageReady = e.IsSuccess;
-        SetStatus(e.IsSuccess
-            ? "Конференция активна"
-            : "Не удалось загрузить комнату.");
+        SetStatus(e.IsSuccess ? "Конференция активна" : "Не удалось загрузить комнату.");
+        if (e.IsSuccess)
+            await InstallBridgeAsync();
+        else
+            ConferenceSession.Publish(ConferenceSessionState.Inactive);
+    }
+
+    private async Task InstallBridgeAsync()
+    {
+        if (!_pageReady)
+            return;
+
+        try
+        {
+            // Script is versioned/idempotent; safe to re-run after updates.
+            await RoomWebView.InvokeScript(BridgeScript);
+            _bridgeInstalled = true;
+        }
+        catch
+        {
+            // Retry on next poll attempt via watchdog.
+        }
+    }
+
+    private void OnWebMessageReceived(object? sender, WebMessageReceivedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(e.Body))
+            return;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(e.Body);
+            var root = doc.RootElement;
+            var active = root.TryGetProperty("active", out var a) && a.GetBoolean();
+            var audioMuted = root.TryGetProperty("audioMuted", out var am) && am.GetBoolean();
+            var videoMuted = root.TryGetProperty("videoMuted", out var vm) && vm.GetBoolean();
+            var participants = new List<ConferenceParticipant>();
+
+            if (root.TryGetProperty("participants", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in arr.EnumerateArray())
+                {
+                    var id = item.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? Guid.NewGuid().ToString("N") : Guid.NewGuid().ToString("N");
+                    var name = item.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? "Участник" : "Участник";
+                    var avatar = item.TryGetProperty("avatar", out var avEl) ? avEl.GetString() : null;
+                    var local = item.TryGetProperty("local", out var locEl) && locEl.GetBoolean();
+                    participants.Add(new ConferenceParticipant(id, name, string.IsNullOrWhiteSpace(avatar) ? null : avatar, local));
+                }
+            }
+
+            ConferenceSession.Publish(new ConferenceSessionState(active, audioMuted, videoMuted, participants));
+            SetStatus(active
+                ? $"В конференции: {participants.Count}"
+                : "Ожидание подключения к конференции…");
+        }
+        catch
+        {
+            // Ignore malformed payloads from the page.
+        }
     }
 
     private async Task WatchdogAsync()
     {
         await Task.Delay(15000);
         if (_pageReady)
+        {
+            if (!_bridgeInstalled)
+                await InstallBridgeAsync();
             return;
+        }
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
@@ -133,7 +359,7 @@ public partial class MainView : UserControl
             Dispatcher.UIThread.Post(() => StatusText.Text = text);
     }
 
-    private async Task ToggleMicrophoneCoreAsync()
+    private async Task RunScriptAsync(string script)
     {
         if (!_pageReady)
             return;
@@ -142,11 +368,11 @@ public partial class MainView : UserControl
         {
             try
             {
-                await RoomWebView.InvokeScript(ToggleMicScript);
+                await RoomWebView.InvokeScript(script);
             }
             catch
             {
-                // WebView may not be ready yet (join screen / reload).
+                // WebView may not be ready yet.
             }
         });
     }

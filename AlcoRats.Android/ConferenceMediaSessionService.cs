@@ -1,9 +1,16 @@
+using System;
+using System.Collections.Concurrent;
+using System.Linq;
+using System.Net.Http;
+using System.Threading.Tasks;
 using AlcoRats.Services;
 using Android.App;
 using Android.Content;
 using Android.Content.PM;
+using Android.Graphics;
 using Android.OS;
 using Android.Views;
+using Android.Widget;
 using AndroidX.Core.App;
 using AndroidX.Media.Session;
 using MediaMetadataCompat = Android.Support.V4.Media.MediaMetadataCompat;
@@ -16,14 +23,56 @@ namespace AlcoRats.Android;
     Name = "com.alcorats.app.ConferenceMediaSessionService",
     Exported = true,
     ForegroundServiceType = ForegroundService.TypeMediaPlayback | ForegroundService.TypeMicrophone)]
-[IntentFilter([Intent.ActionMediaButton])]
+[IntentFilter([Intent.ActionMediaButton, ActionToggleMic, ActionToggleCam, ActionLeave, ActionRefresh])]
 public sealed class ConferenceMediaSessionService : Service
 {
     public const string ChannelId = "alcorats_conference_hotkeys";
     public const int NotificationId = 4201;
 
+    public const string ActionToggleMic = "com.alcorats.app.ACTION_TOGGLE_MIC";
+    public const string ActionToggleCam = "com.alcorats.app.ACTION_TOGGLE_CAM";
+    public const string ActionLeave = "com.alcorats.app.ACTION_LEAVE";
+    public const string ActionRefresh = "com.alcorats.app.ACTION_REFRESH";
+
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
+    private static readonly ConcurrentDictionary<string, Bitmap?> AvatarCache = new();
+
+    private const int PendingTimeoutMs = 3000;
+
     private MediaSessionCompat? _session;
     private MediaSessionCallback? _callback;
+    private ConferenceSessionState _lastState = ConferenceSessionState.Inactive;
+    private Handler? _mainHandler;
+    private bool _micPending;
+    private bool _camPending;
+    private bool _audioMutedWhenMicPending;
+    private bool _videoMutedWhenCamPending;
+    private Java.Lang.IRunnable? _clearMicPendingRunnable;
+    private Java.Lang.IRunnable? _clearCamPendingRunnable;
+    private readonly int[] _participantContainerIds =
+    [
+        Resource.Id.participant1,
+        Resource.Id.participant2,
+        Resource.Id.participant3,
+        Resource.Id.participant4
+    ];
+
+    private readonly int[] _avatarViewIds =
+    [
+        Resource.Id.avatar1,
+        Resource.Id.avatar2,
+        Resource.Id.avatar3,
+        Resource.Id.avatar4
+    ];
+
+    private readonly int[] _nameViewIds =
+    [
+        Resource.Id.name1,
+        Resource.Id.name2,
+        Resource.Id.name3,
+        Resource.Id.name4
+    ];
+
 
     public override IBinder? OnBind(Intent? intent) => null;
 
@@ -32,13 +81,169 @@ public sealed class ConferenceMediaSessionService : Service
         base.OnCreate();
         EnsureNotificationChannel();
         CreateMediaSession();
+        ConferenceSession.StateChanged += OnConferenceStateChanged;
     }
 
     public override StartCommandResult OnStartCommand(Intent? intent, StartCommandFlags flags, int startId)
     {
         MediaButtonReceiver.HandleIntent(_session, intent);
 
-        var notification = BuildNotification();
+        switch (intent?.Action)
+        {
+            case ActionToggleMic:
+                BeginMicPending();
+                _ = ConferenceSession.ToggleMicrophoneAsync();
+                break;
+            case ActionToggleCam:
+                BeginCamPending();
+                _ = ConferenceSession.ToggleCameraAsync();
+                break;
+            case ActionLeave:
+                ClearPending(mic: true, cam: true);
+                _ = ConferenceSession.LeaveAsync();
+                break;
+        }
+
+        PublishForeground(_lastState);
+        if (_session is not null)
+            _session.Active = true;
+        UpdatePlaybackState(PlaybackStateCompat.StatePlaying);
+        return StartCommandResult.Sticky;
+    }
+
+    public override void OnDestroy()
+    {
+        ConferenceSession.StateChanged -= OnConferenceStateChanged;
+        ClearPending(mic: true, cam: true);
+
+        if (_session is not null)
+        {
+            _session.Active = false;
+            _session.SetCallback(null);
+            _session.Release();
+            _session = null;
+        }
+
+        _callback = null;
+        base.OnDestroy();
+    }
+
+    private void OnConferenceStateChanged(ConferenceSessionState state)
+    {
+        ResolvePendingFromState(state);
+        _lastState = state;
+        _ = PrefetchAvatarsAndRefreshAsync(state);
+    }
+
+    private Handler MainHandler => _mainHandler ??= new Handler(Looper.MainLooper!);
+
+    private void BeginMicPending()
+    {
+        _micPending = true;
+        _audioMutedWhenMicPending = _lastState.AudioMuted;
+        SchedulePendingTimeout(ref _clearMicPendingRunnable, () =>
+        {
+            if (!_micPending)
+                return;
+            _micPending = false;
+            PublishForeground(_lastState);
+        });
+    }
+
+    private void BeginCamPending()
+    {
+        _camPending = true;
+        _videoMutedWhenCamPending = _lastState.VideoMuted;
+        SchedulePendingTimeout(ref _clearCamPendingRunnable, () =>
+        {
+            if (!_camPending)
+                return;
+            _camPending = false;
+            PublishForeground(_lastState);
+        });
+    }
+
+    private void SchedulePendingTimeout(ref Java.Lang.IRunnable? runnable, Action action)
+    {
+        if (runnable is not null)
+            MainHandler.RemoveCallbacks(runnable);
+
+        runnable = new Java.Lang.Runnable(action);
+        MainHandler.PostDelayed(runnable, PendingTimeoutMs);
+    }
+
+    private void ResolvePendingFromState(ConferenceSessionState state)
+    {
+        if (_micPending && state.AudioMuted != _audioMutedWhenMicPending)
+        {
+            _micPending = false;
+            if (_clearMicPendingRunnable is not null)
+                MainHandler.RemoveCallbacks(_clearMicPendingRunnable);
+        }
+
+        if (_camPending && state.VideoMuted != _videoMutedWhenCamPending)
+        {
+            _camPending = false;
+            if (_clearCamPendingRunnable is not null)
+                MainHandler.RemoveCallbacks(_clearCamPendingRunnable);
+        }
+
+        if (!state.IsActive)
+            ClearPending(mic: true, cam: true);
+    }
+
+    private void ClearPending(bool mic, bool cam)
+    {
+        if (mic)
+        {
+            _micPending = false;
+            if (_clearMicPendingRunnable is not null)
+                MainHandler.RemoveCallbacks(_clearMicPendingRunnable);
+        }
+
+        if (cam)
+        {
+            _camPending = false;
+            if (_clearCamPendingRunnable is not null)
+                MainHandler.RemoveCallbacks(_clearCamPendingRunnable);
+        }
+    }
+
+    private async Task PrefetchAvatarsAndRefreshAsync(ConferenceSessionState state)
+    {
+        if (state.IsActive)
+        {
+            foreach (var participant in state.Participants.Take(4))
+            {
+                if (string.IsNullOrWhiteSpace(participant.AvatarUrl))
+                    continue;
+                if (AvatarCache.ContainsKey(participant.AvatarUrl))
+                    continue;
+
+                try
+                {
+                    await using var stream = await Http.GetStreamAsync(participant.AvatarUrl).ConfigureAwait(false);
+                    var bitmap = await BitmapFactory.DecodeStreamAsync(stream).ConfigureAwait(false);
+                    if (bitmap is not null)
+                        AvatarCache[participant.AvatarUrl] = CreateCircularBitmap(bitmap);
+                }
+                catch
+                {
+                    AvatarCache.TryAdd(participant.AvatarUrl, null);
+                }
+            }
+        }
+
+        var handler = new Handler(Looper.MainLooper!);
+        handler.Post(() => PublishForeground(state));
+    }
+
+    private void PublishForeground(ConferenceSessionState state)
+    {
+        var notification = BuildNotification(state);
+        var manager = NotificationManagerCompat.From(this);
+        manager?.Notify(NotificationId, notification);
+
         if (global::System.OperatingSystem.IsAndroidVersionAtLeast(30))
         {
             StartForeground(
@@ -54,26 +259,6 @@ public sealed class ConferenceMediaSessionService : Service
         {
             StartForeground(NotificationId, notification);
         }
-
-        if (_session is not null)
-            _session.Active = true;
-
-        UpdatePlaybackState(PlaybackStateCompat.StatePlaying);
-        return StartCommandResult.Sticky;
-    }
-
-    public override void OnDestroy()
-    {
-        if (_session is not null)
-        {
-            _session.Active = false;
-            _session.SetCallback(null);
-            _session.Release();
-            _session = null;
-        }
-
-        _callback = null;
-        base.OnDestroy();
     }
 
     private void CreateMediaSession()
@@ -124,20 +309,21 @@ public sealed class ConferenceMediaSessionService : Service
             return;
 
         var manager = (NotificationManager?)GetSystemService(NotificationService);
-        if (manager?.GetNotificationChannel(ChannelId) is not null)
+        var existing = manager?.GetNotificationChannel(ChannelId);
+        if (existing is not null)
             return;
 
         var channel = new NotificationChannel(
             ChannelId,
-            "Хоткей микрофона",
-            NotificationImportance.Low)
+            "Конференция",
+            NotificationImportance.Default)
         {
-            Description = "Нужен, чтобы Play/Pause глушил микрофон при выключенном экране."
+            Description = "Панель конференции: участники, микрофон, камера, выход. Play/Pause — mute."
         };
         manager?.CreateNotificationChannel(channel);
     }
 
-    private Notification BuildNotification()
+    private Notification BuildNotification(ConferenceSessionState state)
     {
         var launchIntent = new Intent(this, typeof(MainActivity));
         launchIntent.SetFlags(ActivityFlags.SingleTop | ActivityFlags.ClearTop);
@@ -148,18 +334,126 @@ public sealed class ConferenceMediaSessionService : Service
             PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable);
 
         var icon = ApplicationInfo?.Icon ?? global::Android.Resource.Drawable.IcMediaPlay;
-
-        return new NotificationCompat.Builder(this, ChannelId)!
-            .SetContentTitle("AlcoRats")!
-            .SetContentText("Play/Pause на гарнитуре — mute/unmute микрофона")!
+        var builder = new NotificationCompat.Builder(this, ChannelId)!
             .SetSmallIcon(icon)!
             .SetContentIntent(contentIntent)!
             .SetOngoing(true)!
             .SetOnlyAlertOnce(true)!
-            .SetCategory(NotificationCompat.CategoryService)!
+            .SetCategory(NotificationCompat.CategoryCall)!
             .SetVisibility(NotificationCompat.VisibilityPublic)!
-            .SetPriority((int)NotificationPriority.Low)!
+            .SetPriority((int)NotificationPriority.Default)!;
+
+        if (!state.IsActive)
+        {
+            return builder
+                .SetContentTitle("AlcoRats")!
+                .SetContentText("Ожидание конференции…")!
+                .Build()!;
+        }
+
+        var names = string.Join(", ", state.Participants.Take(4).Select(p => p.Name));
+        if (string.IsNullOrWhiteSpace(names))
+            names = "Вы в конференции";
+
+        var remoteViews = new RemoteViews(PackageName, Resource.Layout.notification_conference);
+        BindConferenceRemoteViews(remoteViews, state);
+
+        return builder
+            .SetContentTitle("Конференция")!
+            .SetContentText(names)!
+            .SetCustomContentView(remoteViews)!
+            .SetCustomBigContentView(remoteViews)!
+            .SetStyle(new NotificationCompat.DecoratedCustomViewStyle())!
             .Build()!;
+    }
+
+    private void BindConferenceRemoteViews(RemoteViews views, ConferenceSessionState state)
+    {
+        var participants = state.Participants.Take(4).ToList();
+        for (var i = 0; i < _avatarViewIds.Length; i++)
+        {
+            var containerId = _participantContainerIds[i];
+            var avatarId = _avatarViewIds[i];
+            var nameId = _nameViewIds[i];
+
+            if (i >= participants.Count)
+            {
+                views.SetViewVisibility(containerId, ViewStates.Gone);
+                continue;
+            }
+
+            var participant = participants[i];
+            views.SetViewVisibility(containerId, ViewStates.Visible);
+            views.SetTextViewText(nameId, TruncateName(participant.Name));
+
+            if (!string.IsNullOrWhiteSpace(participant.AvatarUrl)
+                && AvatarCache.TryGetValue(participant.AvatarUrl, out var bitmap)
+                && bitmap is not null)
+            {
+                views.SetImageViewBitmap(avatarId, bitmap);
+            }
+            else
+            {
+                views.SetImageViewResource(avatarId, Resource.Drawable.ic_avatar_placeholder);
+            }
+        }
+
+        var extra = Math.Max(0, state.Participants.Count - 4);
+        views.SetTextViewText(
+            Resource.Id.participant_count,
+            extra > 0 ? $"+{extra}" : string.Empty);
+
+        views.SetImageViewResource(
+            Resource.Id.btn_mic,
+            _micPending
+                ? Resource.Drawable.ic_mic_pending
+                : state.AudioMuted
+                    ? Resource.Drawable.ic_mic_off
+                    : Resource.Drawable.ic_mic);
+        views.SetImageViewResource(
+            Resource.Id.btn_cam,
+            _camPending
+                ? Resource.Drawable.ic_cam_pending
+                : state.VideoMuted
+                    ? Resource.Drawable.ic_cam_off
+                    : Resource.Drawable.ic_cam);
+
+        views.SetOnClickPendingIntent(Resource.Id.btn_mic, CreateActionPendingIntent(ActionToggleMic, 11));
+        views.SetOnClickPendingIntent(Resource.Id.btn_cam, CreateActionPendingIntent(ActionToggleCam, 12));
+        views.SetOnClickPendingIntent(Resource.Id.btn_leave, CreateActionPendingIntent(ActionLeave, 13));
+    }
+
+    private static string TruncateName(string? name)
+    {
+        var value = string.IsNullOrWhiteSpace(name) ? "Участник" : name.Trim();
+        return value.Length <= 10 ? value : value[..10] + "...";
+    }
+
+    private PendingIntent CreateActionPendingIntent(string action, int requestCode)
+    {
+        var intent = new Intent(this, typeof(ConferenceMediaSessionService));
+        intent.SetAction(action);
+        return PendingIntent.GetService(
+            this,
+            requestCode,
+            intent,
+            PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable)!;
+    }
+
+    private static Bitmap CreateCircularBitmap(Bitmap source)
+    {
+        var size = Math.Min(source.Width, source.Height);
+        var output = Bitmap.CreateBitmap(size, size, Bitmap.Config.Argb8888!)!;
+        using var canvas = new Canvas(output);
+        using var paint = new Paint { AntiAlias = true };
+        var rect = new Rect(0, 0, size, size);
+        canvas.DrawARGB(0, 0, 0, 0);
+        canvas.DrawCircle(size / 2f, size / 2f, size / 2f, paint);
+        paint.SetXfermode(new PorterDuffXfermode(PorterDuff.Mode.SrcIn!));
+        canvas.DrawBitmap(source, rect, rect, paint);
+        if (!ReferenceEquals(source, output))
+            source.Recycle();
+        return output;
     }
 
     public static void Start(Context context)
@@ -204,7 +498,7 @@ public sealed class ConferenceMediaSessionService : Service
         }
 
         private static void Toggle()
-            => _ = ConferenceHotkeys.ToggleMicrophoneAsync();
+            => _ = ConferenceSession.ToggleMicrophoneAsync();
 
         private static KeyEvent? ExtractKeyEvent(Intent? mediaButtonEvent)
         {

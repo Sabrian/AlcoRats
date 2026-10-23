@@ -54,6 +54,9 @@ public sealed class ConferenceMediaSessionService : Service
     private bool _camPending;
     private bool _audioMutedWhenMicPending;
     private bool _videoMutedWhenCamPending;
+    /// <summary>Unread already present while history is still catching up after join — no tones yet.</summary>
+    private int _unreadChatJoinFloor;
+    private bool _chatToneBaselineReady;
     private static readonly object ToneLock = new();
     private Java.Lang.IRunnable? _clearMicPendingRunnable;
     private Java.Lang.IRunnable? _clearCamPendingRunnable;
@@ -150,6 +153,7 @@ public sealed class ConferenceMediaSessionService : Service
             && _lastState.IsActive
             && state.AudioMuted != _lastState.AudioMuted;
 
+        UpdateChatJoinBaseline(state);
         var newChatMessage = ShouldPlayIncomingMessageTone(state);
 
         ResolvePendingFromState(state);
@@ -163,9 +167,42 @@ public sealed class ConferenceMediaSessionService : Service
             PlayIncomingMessageTone();
     }
 
+    /// <summary>
+    /// While joining, unread often climbs 0→1→2… as history loads. Raise a floor until the
+    /// count stops growing — no timer, only “still catching up” vs “stable”.
+    /// </summary>
+    private void UpdateChatJoinBaseline(ConferenceSessionState state)
+    {
+        if (!state.IsActive)
+        {
+            _unreadChatJoinFloor = 0;
+            _chatToneBaselineReady = false;
+            return;
+        }
+
+        if (!_lastState.IsActive)
+        {
+            _unreadChatJoinFloor = state.UnreadChatCount;
+            _chatToneBaselineReady = false;
+            return;
+        }
+
+        if (_chatToneBaselineReady)
+        {
+            if (state.UnreadChatCount < _lastState.UnreadChatCount)
+                _unreadChatJoinFloor = 0;
+            return;
+        }
+
+        if (state.UnreadChatCount > _unreadChatJoinFloor)
+            _unreadChatJoinFloor = state.UnreadChatCount;
+        else
+            _chatToneBaselineReady = true;
+    }
+
     private bool ShouldPlayIncomingMessageTone(ConferenceSessionState state)
     {
-        if (!state.IsActive || !_lastState.IsActive)
+        if (!state.IsActive || !_lastState.IsActive || !_chatToneBaselineReady)
             return false;
 
         return state.UnreadChatCount > _lastState.UnreadChatCount;

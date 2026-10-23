@@ -56,17 +56,16 @@ public class MainActivity : AvaloniaMainActivity
     }
 
     /// <summary>
-    /// Keep Avalonia/WebView in the usable area above system bars.
-    /// Edge-to-edge (DecorFitsSystemWindows=false) leaves a nav-bar gap under Jitsi's
-    /// floating toolbar while the toolbar still overlays the video — avoid that.
+    /// Edge-to-edge with padding for status/cutout only.
+    /// Do NOT pad the bottom: Jitsi already lifts its toolbox by safe-area-inset-bottom
+    /// (gesture bar). Padding both = empty black gap under the toolbox (see Pixel screenshot).
     /// </summary>
     private void FitDisplayToDevice()
     {
         if (Window is null)
             return;
 
-        // Let the framework inset content for status + navigation bars.
-        WindowCompat.SetDecorFitsSystemWindows(Window, true);
+        WindowCompat.SetDecorFitsSystemWindows(Window, false);
 
         if (global::System.OperatingSystem.IsAndroidVersionAtLeast(28))
         {
@@ -77,17 +76,41 @@ public class MainActivity : AvaloniaMainActivity
                 Window.Attributes = layoutParams;
             }
         }
+
+        var content = FindViewById(global::Android.Resource.Id.Content);
+        if (content is null)
+            return;
+
+        ViewCompat.SetOnApplyWindowInsetsListener(content, new SystemBarsPaddingInsets());
+        ViewCompat.RequestApplyInsets(content);
+    }
+
+    private sealed class SystemBarsPaddingInsets : Java.Lang.Object, IOnApplyWindowInsetsListener
+    {
+        public WindowInsetsCompat OnApplyWindowInsets(View? v, WindowInsetsCompat? insets)
+        {
+            if (v is null || insets is null)
+                return insets ?? WindowInsetsCompat.Consumed;
+
+            var bars = insets.GetInsets(
+                WindowInsetsCompat.Type.SystemBars() | WindowInsetsCompat.Type.DisplayCutout());
+            // Bottom stays 0 — gesture inset is handled inside the WebView by Jitsi.
+            v.SetPadding(bars.Left, bars.Top, bars.Right, 0);
+            return insets.Inset(bars.Left, bars.Top, bars.Right, 0);
+        }
     }
 
     public override void OnConfigurationChanged(Configuration newConfig)
     {
         base.OnConfigurationChanged(newConfig);
         ApplyWindowBackground();
+        FitDisplayToDevice();
     }
 
     protected override void OnResume()
     {
         base.OnResume();
+        FitDisplayToDevice();
 
         if (!_permissionRequestInFlight)
             RequestNextPermission();

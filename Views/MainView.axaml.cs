@@ -158,12 +158,66 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 8) return 'exists';
-          window.__alcoRatsBridgeVersion = 8;
+          if (window.__alcoRatsBridgeVersion === 10) return 'exists';
+          window.__alcoRatsBridgeVersion = 10;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           // Allow re-subscribe after WebView/bridge reinstall.
           window.__alcoRatsChatSubscribed = false;
+
+          function forceRussianUi() {
+            try {
+              if (window.localStorage) {
+                localStorage.setItem('language', 'ru');
+                localStorage.setItem('i18nextLng', 'ru');
+                for (var i = localStorage.length - 1; i >= 0; i--) {
+                  var key = localStorage.key(i);
+                  if (!key) continue;
+                  var raw = localStorage.getItem(key);
+                  if (!raw || raw.indexOf('userSelectedLanguage') < 0) continue;
+                  try {
+                    var parsed = JSON.parse(raw);
+                    var changed = false;
+                    function patch(node) {
+                      if (!node || typeof node !== 'object') return;
+                      if (Object.prototype.hasOwnProperty.call(node, 'userSelectedLanguage')
+                          && node.userSelectedLanguage !== 'ru') {
+                        node.userSelectedLanguage = 'ru';
+                        changed = true;
+                      }
+                      Object.keys(node).forEach(function (k) { patch(node[k]); });
+                    }
+                    patch(parsed);
+                    if (changed) localStorage.setItem(key, JSON.stringify(parsed));
+                  } catch (e1) {}
+                }
+              }
+            } catch (e) {}
+            try {
+              if (window.i18next && typeof i18next.changeLanguage === 'function'
+                  && i18next.language !== 'ru')
+                i18next.changeLanguage('ru');
+            } catch (e2) {}
+            try {
+              if (typeof APP !== 'undefined' && APP.store && typeof APP.store.dispatch === 'function') {
+                APP.store.dispatch({ type: 'SETTINGS_UPDATED', settings: { userSelectedLanguage: 'ru' } });
+                APP.store.dispatch({ type: 'UPDATE_SETTINGS', settings: { userSelectedLanguage: 'ru' } });
+              }
+            } catch (e3) {}
+          }
+
+          forceRussianUi();
+          if (!window.__alcoRatsUiFixTimer) {
+            var uiFixTicks = 0;
+            window.__alcoRatsUiFixTimer = setInterval(function () {
+              forceRussianUi();
+              uiFixTicks++;
+              if (uiFixTicks > 40) {
+                clearInterval(window.__alcoRatsUiFixTimer);
+                window.__alcoRatsUiFixTimer = null;
+              }
+            }, 250);
+          }
 
           function addParticipant(byId, p, isLocal) {
             if (!p || typeof p !== 'object') return;
@@ -796,9 +850,11 @@ public partial class MainView : UserControl
 
     private Uri ApplyRoomUrlConfig(Uri url)
     {
-        // Jitsi reads hash overrides: defaultLanguage forces RU UI regardless of browser locale.
+        // lang=ru is the supported override; defaultLanguage alone is often ignored once
+        // a language was persisted in WebView localStorage.
         var parameters = new List<(string Key, string Value)>
         {
+            ("lang", "ru"),
             ("config.defaultLanguage", "\"ru\"")
         };
 
@@ -813,8 +869,10 @@ public partial class MainView : UserControl
 
     private static Uri WithHashParams(Uri url, params (string Key, string Value)[] parameters)
     {
-        var builder = new UriBuilder(url);
-        var fragment = (builder.Fragment ?? string.Empty).TrimStart('#');
+        // Build fragment manually — UriBuilder percent-encodes quotes and breaks Jitsi parsers.
+        var absolute = url.GetLeftPart(UriPartial.Path);
+        var query = url.Query; // includes leading '?' or empty
+        var fragment = (url.Fragment ?? string.Empty).TrimStart('#');
         var parts = string.IsNullOrEmpty(fragment)
             ? new List<string>()
             : new List<string>(fragment.Split('&', StringSplitOptions.RemoveEmptyEntries));
@@ -838,8 +896,8 @@ public partial class MainView : UserControl
                 parts.Add($"{key}={value}");
         }
 
-        builder.Fragment = string.Join('&', parts);
-        return builder.Uri;
+        var hash = string.Join('&', parts);
+        return new Uri(string.IsNullOrEmpty(hash) ? absolute + query : absolute + query + "#" + hash, UriKind.Absolute);
     }
 
     private void OnNavigationStarted(object? sender, WebViewNavigationEventArgs e)

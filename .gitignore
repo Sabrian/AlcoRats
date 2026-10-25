@@ -4,3 +4,6 @@
 */obj/*
 bin/
 obj/
+/AlcoRats.Android/publish-out.txt
+/apk-list.txt
+/publish-out.txt

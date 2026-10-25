@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using AlcoRats.Hosting;
 using AlcoRats.Services;
@@ -158,18 +159,18 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 19) {
+          if (window.__alcoRatsBridgeVersion === 26) {
             try {
               if (typeof window.__alcoRatsFillCredentials === 'function')
                 window.__alcoRatsFillCredentials();
               if (typeof window.__alcoRatsDismissDeepLink === 'function')
                 window.__alcoRatsDismissDeepLink();
               if (typeof window.__alcoRatsEnterHomeFromWelcome === 'function')
-                window.__alcoRatsEnterHomeFromWelcome();
+                setTimeout(window.__alcoRatsEnterHomeFromWelcome, 0);
             } catch (eEx) {}
             return 'exists';
           }
-          window.__alcoRatsBridgeVersion = 19;
+          window.__alcoRatsBridgeVersion = 26;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           if (window.__alcoRatsUiFixTimer) {
@@ -230,9 +231,9 @@ public partial class MainView : UserControl
             }
           }
 
-          // Reserve space above the fixed toolbox so tile avatars are not clipped.
-          var TOOLBOX_INSET_FALLBACK_PX = 72;
-          var TOOLBOX_INSET_GAP_PX = 10;
+          // Working baseline (pre panel-inset experiments): slight extra height for tiles,
+          // hide toolbox on prejoin, no getUserMedia monkey-patch, no resize storms.
+          var TILE_SCROLL_EXTRA_PX = 96;
 
           function ensureToolboxCss() {
             var style = document.getElementById('alcoRatsToolboxFix');
@@ -241,30 +242,25 @@ public partial class MainView : UserControl
               style.id = 'alcoRatsToolboxFix';
               (document.head || document.documentElement).appendChild(style);
             }
-            // Always refresh rules (bridge bumps / inset strategy changes).
             style.textContent = [
               'html.alcoRats-prejoin .new-toolbox,',
               'html.alcoRats-prejoin #new-toolbox {',
               '  display: none !important; visibility: hidden !important;',
               '  pointer-events: none !important;',
               '}',
-              '.new-toolbox { transition: none !important; }',
+              '.new-toolbox { transition: none !important; transform: none !important; }',
               '.toolbox-content-wrapper::after {',
               '  content: none !important; display: none !important;',
               '  padding: 0 !important; height: 0 !important;',
               '}',
               '.toolbox-content, .toolbox-content-mobile { margin-bottom: 0 !important; }',
-              /* Shrink tile layout above the overlay toolbox instead of scrolling under it. */
-              '.tile-view #videoconference_page,',
-              '.tile-view #videospace,',
-              '.tile-view .filmstrip,',
               '.tile-view .filmstrip #remoteVideos,',
-              '.tile-view .filmstrip.collapse #remoteVideos,',
+              '.tile-view .filmstrip.collapse #remoteVideos {',
+              '  height: calc(100% + ' + TILE_SCROLL_EXTRA_PX + 'px) !important;',
+              '  margin-bottom: 0 !important;',
+              '}',
               '.tile-view .remote-videos,',
               '.tile-view .filmstrip.collapse .remote-videos {',
-              '  padding-bottom: var(--alcoRatsToolboxInset, ' + TOOLBOX_INSET_FALLBACK_PX + 'px) !important;',
-              '  box-sizing: border-box !important;',
-              '  margin-bottom: 0 !important;',
               '  overflow: hidden !important;',
               '  max-height: none !important;',
               '}',
@@ -272,62 +268,28 @@ public partial class MainView : UserControl
             ].join('\\n');
           }
 
-          function measureToolboxInsetPx() {
-            try {
-              if (typeof isConferenceActive === 'function' && !isConferenceActive())
-                return 0;
-              if (typeof isChatOpen === 'function' && isChatOpen())
-                return 0;
-
-              var root = document.querySelector('.new-toolbox') || document.querySelector('#new-toolbox');
-              if (!root) return TOOLBOX_INSET_FALLBACK_PX;
-              var style = window.getComputedStyle(root);
-              if (style && (style.display === 'none' || style.visibility === 'hidden'))
-                return 0;
-
-              var items = root.querySelector('.toolbox-content-items')
-                || root.querySelector('.toolbox-content')
-                || root;
-              var rect = items.getBoundingClientRect && items.getBoundingClientRect();
-              var h = rect && rect.height ? rect.height : 0;
-              if (h < 24) return TOOLBOX_INSET_FALLBACK_PX;
-              return Math.ceil(h + TOOLBOX_INSET_GAP_PX);
-            } catch (e) {
-              return TOOLBOX_INSET_FALLBACK_PX;
-            }
-          }
-
-          function applyTileToolboxInset() {
+          function expandTileScrollArea() {
             try {
               ensureToolboxCss();
-              var inset = measureToolboxInsetPx();
-              document.documentElement.style.setProperty('--alcoRatsToolboxInset', inset + 'px');
-
-              // react-window / inline styles can force overflow — keep tiles clipped cleanly.
               var nodes = document.querySelectorAll(
-                '.tile-view .remote-videos, .tile-view .remote-videos > div, #remoteVideos, .tile-view .filmstrip');
+                '.tile-view .remote-videos, .tile-view .remote-videos > div, #remoteVideos');
               for (var i = 0; i < nodes.length; i++) {
                 var el = nodes[i];
                 if (!el || !el.style) continue;
                 el.style.setProperty('overflow', 'hidden', 'important');
                 el.style.setProperty('overflow-y', 'hidden', 'important');
-                el.style.setProperty('padding-bottom', inset + 'px', 'important');
-                el.style.setProperty('box-sizing', 'border-box', 'important');
               }
             } catch (e) {}
           }
 
-          function expandTileScrollArea() {
-            applyTileToolboxInset();
-          }
-
-          // Snap the button row to the visual viewport bottom (same place chat input uses).
-          // On prejoin/lobby the toolbox must stay hidden (alwaysVisible still paints it).
           function pinToolboxToBottom() {
             try {
               ensureToolboxCss();
               var root = document.querySelector('.new-toolbox') || document.querySelector('#new-toolbox');
-              var active = typeof isConferenceActive === 'function' && isConferenceActive();
+              var prejoin = typeof isPrejoinUiVisible === 'function' && isPrejoinUiVisible();
+              var active = !prejoin
+                && typeof isConferenceActive === 'function'
+                && isConferenceActive();
               try {
                 document.documentElement.classList.toggle('alcoRats-prejoin', !active);
               } catch (e0) {}
@@ -338,74 +300,36 @@ public partial class MainView : UserControl
                 root.style.setProperty('display', 'none', 'important');
                 root.style.setProperty('visibility', 'hidden', 'important');
                 root.style.removeProperty('transform');
-                root.__alcoRatsTy = 0;
                 return;
               }
 
               root.style.removeProperty('display');
               root.style.removeProperty('visibility');
-
-              if (isChatOpen()) {
-                root.style.removeProperty('transform');
-                root.__alcoRatsTy = 0;
-                return;
-              }
-
-              var items = root.querySelector('.toolbox-content-items')
-                || root.querySelector('.toolbox-content')
-                || root;
-              if (!items.getBoundingClientRect) return;
+              root.style.removeProperty('transform');
+              if (isChatOpen()) return;
 
               root.style.setProperty('position', 'fixed', 'important');
               root.style.setProperty('left', '0', 'important');
               root.style.setProperty('right', '0', 'important');
               root.style.setProperty('bottom', '0', 'important');
               root.style.setProperty('width', '100%', 'important');
-
-              var rect = items.getBoundingClientRect();
-              if (!rect.height) return;
-
-              var viewBottom = window.innerHeight;
-              if (window.visualViewport) {
-                viewBottom = window.visualViewport.offsetTop + window.visualViewport.height;
-              }
-
-              var gap = viewBottom - rect.bottom;
-              if (Math.abs(gap) < 0.5) return;
-
-              var ty = (root.__alcoRatsTy || 0) + gap;
-              if (ty > 240) ty = 240;
-              if (ty < -240) ty = -240;
-              root.__alcoRatsTy = ty;
-              root.style.setProperty('transform', 'translateY(' + ty + 'px)', 'important');
             } catch (e) {}
           }
 
           forceRussianUi();
           pinToolboxToBottom();
-          applyTileToolboxInset();
+          expandTileScrollArea();
           if (!window.__alcoRatsUiFixTimer) {
             window.__alcoRatsUiFixTimer = setInterval(function () {
-              forceRussianUi();
               pinToolboxToBottom();
-              applyTileToolboxInset();
-            }, 500);
+              expandTileScrollArea();
+            }, 1500);
           }
           try {
             window.addEventListener('resize', function () {
               pinToolboxToBottom();
-              applyTileToolboxInset();
+              expandTileScrollArea();
             });
-            if (window.visualViewport) {
-              window.visualViewport.addEventListener('resize', function () {
-                pinToolboxToBottom();
-                applyTileToolboxInset();
-              });
-              window.visualViewport.addEventListener('scroll', function () {
-                pinToolboxToBottom();
-                applyTileToolboxInset();
-              });
-            }
           } catch (e) {}
 
           function addParticipant(byId, p, isLocal) {
@@ -431,9 +355,30 @@ public partial class MainView : UserControl
             }
           }
 
+          // Prejoin / device-setup UI (Redux flags are often missing on custom deploys).
+          function isPrejoinUiVisible() {
+            try {
+              var text = ((document.body && (document.body.innerText || document.body.textContent)) || '')
+                .toLowerCase();
+              if (!text) return false;
+              if (text.indexOf('настраиваются устройства') >= 0
+                  || text.indexOf('configuring your devices') >= 0
+                  || text.indexOf('configuring devices') >= 0
+                  || text.indexOf('присоединиться к встрече') >= 0
+                  || text.indexOf('join meeting') >= 0
+                  || text.indexOf('join the meeting') >= 0
+                  || text.indexOf('пожалуйста, введите свое имя') >= 0
+                  || text.indexOf('enter your name') >= 0)
+                return true;
+            } catch (e) {}
+            return false;
+          }
+
           // True only while inside the live call — not prejoin, lobby, or joining.
           function isConferenceActive() {
             try {
+              if (isPrejoinUiVisible())
+                return false;
               if (typeof APP === 'undefined') return false;
 
               var joinedApi = false;
@@ -992,19 +937,28 @@ public partial class MainView : UserControl
           window.__alcoRatsFillCredentials = fillCredentialsIfNeeded;
           window.__alcoRatsDismissDeepLink = dismissDeepLinkingPrompt;
           window.__alcoRatsEnterHomeFromWelcome = enterHomeRoomFromWelcome;
-          window.__alcoRatsBridgeTimer = setInterval(publish, 1500);
+
+          // Debounced credential/welcome pass — raw MutationObserver + body.innerText
+          // on every React paint freezes the prejoin WebView («Настраиваются устройства…»).
+          function scheduleLightDomPass() {
+            if (window.__alcoRatsDomPassScheduled) return;
+            window.__alcoRatsDomPassScheduled = true;
+            setTimeout(function () {
+              window.__alcoRatsDomPassScheduled = false;
+              try {
+                fillCredentialsIfNeeded();
+                dismissDeepLinkingPrompt();
+                enterHomeRoomFromWelcome();
+              } catch (ePass) {}
+            }, 700);
+          }
+
+          window.__alcoRatsBridgeTimer = setInterval(publish, 2000);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
-          window.__alcoRatsPasswordTimer = setInterval(function () {
-            fillCredentialsIfNeeded();
-            dismissDeepLinkingPrompt();
-            enterHomeRoomFromWelcome();
-          }, 300);
-          setTimeout(publish, 300);
-          setTimeout(fillCredentialsIfNeeded, 200);
-          setTimeout(dismissDeepLinkingPrompt, 200);
-          setTimeout(dismissDeepLinkingPrompt, 800);
-          setTimeout(enterHomeRoomFromWelcome, 250);
-          setTimeout(enterHomeRoomFromWelcome, 900);
+          window.__alcoRatsPasswordTimer = setInterval(scheduleLightDomPass, 1200);
+          setTimeout(publish, 400);
+          setTimeout(scheduleLightDomPass, 300);
+          setTimeout(scheduleLightDomPass, 1200);
 
           ensureChatSubscribe();
 
@@ -1012,15 +966,12 @@ public partial class MainView : UserControl
             if (window.__alcoRatsPasswordObserver)
               window.__alcoRatsPasswordObserver.disconnect();
             window.__alcoRatsPasswordObserver = new MutationObserver(function () {
-              fillCredentialsIfNeeded();
-              dismissDeepLinkingPrompt();
-              enterHomeRoomFromWelcome();
+              scheduleLightDomPass();
             });
+            // childList only — attribute (class/style) storms during prejoin device setup.
             window.__alcoRatsPasswordObserver.observe(document.documentElement || document.body, {
               childList: true,
-              subtree: true,
-              attributes: true,
-              attributeFilter: ['class', 'style', 'open']
+              subtree: true
             });
           } catch (e) {}
 
@@ -1374,10 +1325,20 @@ public partial class MainView : UserControl
 
     private Uri ResolveRoomUrl()
     {
-        var url = MainViewModel.BuildRoomUri(_settings.RoomName);
-        if (DataContext is MainViewModel vm)
-            vm.RoomUrl = url;
-        return ApplyRoomUrlConfig(url);
+        // Settings → URI is thread-safe; assigning DataContext/RoomUrl must stay on UI.
+        var url = ApplyRoomUrlConfig(MainViewModel.BuildRoomUri(_settings.RoomName));
+        void AssignVm()
+        {
+            if (DataContext is MainViewModel vm)
+                vm.RoomUrl = url;
+        }
+
+        if (Dispatcher.UIThread.CheckAccess())
+            AssignVm();
+        else
+            Dispatcher.UIThread.Post(AssignVm);
+
+        return url;
     }
 
     private Uri ApplyRoomUrlConfig(Uri url)
@@ -1392,6 +1353,13 @@ public partial class MainView : UserControl
             ("config.disableDeepLinking", "true"),
             ("config.deeplinking.disabled", "true")
         };
+
+        // Display name only — do not force prejoin/GUM/mute flags (those broke WebView join).
+        if (!string.IsNullOrWhiteSpace(_settings.User))
+        {
+            var safeName = _settings.User.Trim().Replace("\"", string.Empty, StringComparison.Ordinal);
+            parameters.Add(("userInfo.displayName", "\"" + safeName + "\""));
+        }
 
         if (_settings.ToolbarAlwaysVisible)
         {
@@ -1446,11 +1414,21 @@ public partial class MainView : UserControl
         _pageReady = e.IsSuccess;
         if (e.IsSuccess)
         {
-            SetStatus("Ожидание подключения к конференции…");
+            SetStatus("Подключение...");
             _conference.Publish(ConferenceSessionState.Inactive);
             UpdateConferenceActionButton(false);
-            await InstallBridgeAsync();
-            await PushBridgeContextAsync();
+            try
+            {
+                // Stay off the UI sync-context while waiting on WebView JS — otherwise
+                // InvokeScript completion (UI callback) + ConfigureAwait(true) deadlocks.
+                await InstallBridgeAsync().ConfigureAwait(false);
+                await PushBridgeContextAsync().ConfigureAwait(false);
+                SetStatus("Ожидание подключения к конференции…");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Bridge install / context push failed");
+            }
         }
         else
         {
@@ -1468,8 +1446,9 @@ public partial class MainView : UserControl
         try
         {
             // Script is versioned/idempotent; safe to re-run after updates.
-            await RoomWebView.InvokeScript(BridgeScript);
-            _bridgeInstalled = true;
+            // Longer budget: first install is large; a timeout must NOT mark installed.
+            if (await InvokeScriptBoundedAsync(BridgeScript, timeoutMs: 8000).ConfigureAwait(false))
+                _bridgeInstalled = true;
         }
         catch
         {
@@ -1487,6 +1466,8 @@ public partial class MainView : UserControl
             ? MainViewModel.DefaultRoomName
             : _settings.RoomName.Trim();
 
+        // Enter-home is deferred with setTimeout so evaluateJavascript can finish;
+        // a sync location.replace cancels the JS result callback and hangs await forever.
         var script =
             "(function(){" +
             $"window.__alcoRatsRoomPassword = {JsonSerializer.Serialize(_settings.RoomPassword ?? string.Empty)};" +
@@ -1496,18 +1477,78 @@ public partial class MainView : UserControl
             $"window.__alcoRatsHomeRoomName = {JsonSerializer.Serialize(roomName)};" +
             "if (typeof window.__alcoRatsFillCredentials === 'function') window.__alcoRatsFillCredentials();" +
             "else if (typeof window.__alcoRatsFillRoomPassword === 'function') window.__alcoRatsFillRoomPassword();" +
-            "if (typeof window.__alcoRatsEnterHomeFromWelcome === 'function') window.__alcoRatsEnterHomeFromWelcome();" +
+            "if (typeof window.__alcoRatsEnterHomeFromWelcome === 'function')" +
+            "  setTimeout(window.__alcoRatsEnterHomeFromWelcome, 0);" +
             "return 'ok';" +
             "})()";
 
         try
         {
-            await RoomWebView.InvokeScript(script);
+            await InvokeScriptBoundedAsync(script).ConfigureAwait(false);
         }
         catch
         {
             // WebView may not be ready yet.
         }
+    }
+
+    /// <summary>
+    /// Runs WebView JS with a real timeout that cannot deadlock the UI dispatcher.
+    /// Avalonia Android completes InvokeScript via a UI-thread callback; awaiting it on
+    /// that same thread with ConfigureAwait(true) freezes WhenAny (Delay never resumes).
+    /// </summary>
+    /// <returns>True if the script completed; false on timeout.</returns>
+    private async Task<bool> InvokeScriptBoundedAsync(string script, int timeoutMs = 4000)
+    {
+        if (RoomWebView is null)
+            return false;
+
+        var webView = RoomWebView;
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void StartInvoke()
+        {
+            try
+            {
+                var task = webView.InvokeScript(script);
+                task.ContinueWith(
+                    static (t, state) =>
+                    {
+                        var source = (TaskCompletionSource<bool>)state!;
+                        if (t.IsFaulted)
+                            source.TrySetException(t.Exception!.GetBaseException());
+                        else if (t.IsCanceled)
+                            source.TrySetCanceled();
+                        else
+                            source.TrySetResult(true);
+                    },
+                    tcs,
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default);
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        }
+
+        // Always schedule InvokeScript through the dispatcher queue so we never call it
+        // while the UI thread is blocked inside an await on the same sync context.
+        if (Dispatcher.UIThread.CheckAccess())
+            Dispatcher.UIThread.Post(StartInvoke, DispatcherPriority.Background);
+        else
+            await Dispatcher.UIThread.InvokeAsync(StartInvoke);
+
+        var finished = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs)).ConfigureAwait(false);
+        if (finished != tcs.Task)
+        {
+            _logger.LogWarning("InvokeScript timed out after {Timeout}ms", timeoutMs);
+            return false;
+        }
+
+        await tcs.Task.ConfigureAwait(false);
+        return true;
     }
 
     private Task PushRoomPasswordAsync()
@@ -1596,16 +1637,13 @@ public partial class MainView : UserControl
         if (!_pageReady)
             return;
 
-        await Dispatcher.UIThread.InvokeAsync(async () =>
+        try
         {
-            try
-            {
-                await RoomWebView.InvokeScript(script);
-            }
-            catch
-            {
-                // WebView may not be ready yet.
-            }
-        });
+            _ = await InvokeScriptBoundedAsync(script, timeoutMs: 3000).ConfigureAwait(false);
+        }
+        catch
+        {
+            // WebView may not be ready yet.
+        }
     }
 }

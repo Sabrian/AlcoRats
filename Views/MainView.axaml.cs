@@ -158,7 +158,7 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 18) {
+          if (window.__alcoRatsBridgeVersion === 19) {
             try {
               if (typeof window.__alcoRatsFillCredentials === 'function')
                 window.__alcoRatsFillCredentials();
@@ -169,7 +169,7 @@ public partial class MainView : UserControl
             } catch (eEx) {}
             return 'exists';
           }
-          window.__alcoRatsBridgeVersion = 18;
+          window.__alcoRatsBridgeVersion = 19;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           if (window.__alcoRatsUiFixTimer) {
@@ -230,14 +230,18 @@ public partial class MainView : UserControl
             }
           }
 
-          // Extra px for tile-view scrollport (toolbox is position:fixed overlay).
-          var TILE_SCROLL_EXTRA_PX = 128;
+          // Reserve space above the fixed toolbox so tile avatars are not clipped.
+          var TOOLBOX_INSET_FALLBACK_PX = 72;
+          var TOOLBOX_INSET_GAP_PX = 10;
 
           function ensureToolboxCss() {
-            if (document.getElementById('alcoRatsToolboxFix')) return;
-            var style = document.createElement('style');
-            style.id = 'alcoRatsToolboxFix';
-            // Hide toolbox on prejoin/lobby; kill safe-area ::after; expand tile scroll area.
+            var style = document.getElementById('alcoRatsToolboxFix');
+            if (!style) {
+              style = document.createElement('style');
+              style.id = 'alcoRatsToolboxFix';
+              (document.head || document.documentElement).appendChild(style);
+            }
+            // Always refresh rules (bridge bumps / inset strategy changes).
             style.textContent = [
               'html.alcoRats-prejoin .new-toolbox,',
               'html.alcoRats-prejoin #new-toolbox {',
@@ -250,36 +254,71 @@ public partial class MainView : UserControl
               '  padding: 0 !important; height: 0 !important;',
               '}',
               '.toolbox-content, .toolbox-content-mobile { margin-bottom: 0 !important; }',
-              /* Jitsi shrinks #remoteVideos by toolbar height → tiny overflow + scrollbar.
-                 Toolbox is fixed overlay, so reclaim 100% and add a constant. */
+              /* Shrink tile layout above the overlay toolbox instead of scrolling under it. */
+              '.tile-view #videoconference_page,',
+              '.tile-view #videospace,',
+              '.tile-view .filmstrip,',
               '.tile-view .filmstrip #remoteVideos,',
-              '.tile-view .filmstrip.collapse #remoteVideos {',
-              '  height: calc(100% + ' + TILE_SCROLL_EXTRA_PX + 'px) !important;',
-              '  margin-bottom: 0 !important;',
-              '}',
+              '.tile-view .filmstrip.collapse #remoteVideos,',
               '.tile-view .remote-videos,',
               '.tile-view .filmstrip.collapse .remote-videos {',
+              '  padding-bottom: var(--alcoRatsToolboxInset, ' + TOOLBOX_INSET_FALLBACK_PX + 'px) !important;',
+              '  box-sizing: border-box !important;',
+              '  margin-bottom: 0 !important;',
               '  overflow: hidden !important;',
               '  max-height: none !important;',
               '}',
               '.tile-view .filmstrip__videos.has-scroll { padding-left: 0 !important; }'
             ].join('\\n');
-            (document.head || document.documentElement).appendChild(style);
           }
 
-          function expandTileScrollArea() {
+          function measureToolboxInsetPx() {
+            try {
+              if (typeof isConferenceActive === 'function' && !isConferenceActive())
+                return 0;
+              if (typeof isChatOpen === 'function' && isChatOpen())
+                return 0;
+
+              var root = document.querySelector('.new-toolbox') || document.querySelector('#new-toolbox');
+              if (!root) return TOOLBOX_INSET_FALLBACK_PX;
+              var style = window.getComputedStyle(root);
+              if (style && (style.display === 'none' || style.visibility === 'hidden'))
+                return 0;
+
+              var items = root.querySelector('.toolbox-content-items')
+                || root.querySelector('.toolbox-content')
+                || root;
+              var rect = items.getBoundingClientRect && items.getBoundingClientRect();
+              var h = rect && rect.height ? rect.height : 0;
+              if (h < 24) return TOOLBOX_INSET_FALLBACK_PX;
+              return Math.ceil(h + TOOLBOX_INSET_GAP_PX);
+            } catch (e) {
+              return TOOLBOX_INSET_FALLBACK_PX;
+            }
+          }
+
+          function applyTileToolboxInset() {
             try {
               ensureToolboxCss();
-              // react-window may set overflow via element.style — force-hide scrollbar.
+              var inset = measureToolboxInsetPx();
+              document.documentElement.style.setProperty('--alcoRatsToolboxInset', inset + 'px');
+
+              // react-window / inline styles can force overflow — keep tiles clipped cleanly.
               var nodes = document.querySelectorAll(
-                '.tile-view .remote-videos, .tile-view .remote-videos > div, #remoteVideos');
+                '.tile-view .remote-videos, .tile-view .remote-videos > div, #remoteVideos, .tile-view .filmstrip');
               for (var i = 0; i < nodes.length; i++) {
                 var el = nodes[i];
                 if (!el || !el.style) continue;
                 el.style.setProperty('overflow', 'hidden', 'important');
                 el.style.setProperty('overflow-y', 'hidden', 'important');
+                el.style.setProperty('padding-bottom', inset + 'px', 'important');
+                el.style.setProperty('box-sizing', 'border-box', 'important');
               }
             } catch (e) {}
+          }
+
+          function expandTileScrollArea() {
+            applyTileToolboxInset();
           }
 
           // Snap the button row to the visual viewport bottom (same place chat input uses).
@@ -344,25 +383,28 @@ public partial class MainView : UserControl
 
           forceRussianUi();
           pinToolboxToBottom();
-          expandTileScrollArea();
+          applyTileToolboxInset();
           if (!window.__alcoRatsUiFixTimer) {
             window.__alcoRatsUiFixTimer = setInterval(function () {
               forceRussianUi();
               pinToolboxToBottom();
-              expandTileScrollArea();
+              applyTileToolboxInset();
             }, 500);
           }
           try {
             window.addEventListener('resize', function () {
               pinToolboxToBottom();
-              expandTileScrollArea();
+              applyTileToolboxInset();
             });
             if (window.visualViewport) {
               window.visualViewport.addEventListener('resize', function () {
                 pinToolboxToBottom();
-                expandTileScrollArea();
+                applyTileToolboxInset();
               });
-              window.visualViewport.addEventListener('scroll', pinToolboxToBottom);
+              window.visualViewport.addEventListener('scroll', function () {
+                pinToolboxToBottom();
+                applyTileToolboxInset();
+              });
             }
           } catch (e) {}
 

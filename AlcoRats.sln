@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.0.31903.59
+# Visual Studio Version 18
+VisualStudioVersion = 18.10.12224.181 stable
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AlcoRats", "AlcoRats.csproj", "{F541BFC4-783E-4303-B8E9-6CBB7F2F3FC0}"
 EndProject
@@ -10,6 +10,8 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AlcoRats.Android", "AlcoRats.Android\AlcoRats.Android.csproj", "{8C9A5D0D-0C51-4529-BC6B-8E592249B4FB}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AlcoRats.iOS", "AlcoRats.iOS\AlcoRats.iOS.csproj", "{01BB6273-FD64-4FD4-AF0A-80D4FDF1FF20}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AlcoRats.Bot", "AlcoRats.Bot\AlcoRats.Bot.csproj", "{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -81,6 +83,18 @@ Global
 		{01BB6273-FD64-4FD4-AF0A-80D4FDF1FF20}.Release|x86.ActiveCfg = Release|Any CPU
 		{01BB6273-FD64-4FD4-AF0A-80D4FDF1FF20}.Release|x86.Build.0 = Release|Any CPU
 		{01BB6273-FD64-4FD4-AF0A-80D4FDF1FF20}.Release|x86.Deploy.0 = Release|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Debug|x64.Build.0 = Debug|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Debug|x86.Build.0 = Debug|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Release|x64.ActiveCfg = Release|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Release|x64.Build.0 = Release|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Release|x86.ActiveCfg = Release|Any CPU
+		{2BD1A1C5-DE16-49B3-8F9E-06AED23C7ADD}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

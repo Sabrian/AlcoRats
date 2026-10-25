@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "AlcoRats.Bot": {
+      "commandName": "Project"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}

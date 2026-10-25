@@ -12,24 +12,31 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Nested app/tool projects must not be compiled into the shared library. -->
     <Compile Remove="AlcoRats.Android\**" />
+    <Compile Remove="AlcoRats.Bot\**" />
     <Compile Remove="AlcoRats.Desktop\**" />
     <Compile Remove="AlcoRats.iOS\**" />
     <Compile Remove=".tools\**" />
     <None Remove="AlcoRats.Android\**" />
+    <None Remove="AlcoRats.Bot\**" />
     <None Remove="AlcoRats.Desktop\**" />
     <None Remove="AlcoRats.iOS\**" />
     <None Remove=".tools\**" />
     <EmbeddedResource Remove="AlcoRats.Android\**" />
+    <EmbeddedResource Remove="AlcoRats.Bot\**" />
     <EmbeddedResource Remove="AlcoRats.Desktop\**" />
     <EmbeddedResource Remove="AlcoRats.iOS\**" />
     <AvaloniaXaml Remove="AlcoRats.Android\**" />
+    <AvaloniaXaml Remove="AlcoRats.Bot\**" />
     <AvaloniaXaml Remove="AlcoRats.Desktop\**" />
     <AvaloniaXaml Remove="AlcoRats.iOS\**" />
     <AvaloniaResource Remove="AlcoRats.Android\**" />
+    <AvaloniaResource Remove="AlcoRats.Bot\**" />
     <AvaloniaResource Remove="AlcoRats.Desktop\**" />
     <AvaloniaResource Remove="AlcoRats.iOS\**" />
     <Content Remove="AlcoRats.Android\**" />
+    <Content Remove="AlcoRats.Bot\**" />
     <Content Remove="AlcoRats.Desktop\**" />
     <Content Remove="AlcoRats.iOS\**" />
     <Content Remove=".tools\**" />

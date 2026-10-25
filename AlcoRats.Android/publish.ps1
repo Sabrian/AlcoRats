@@ -1,6 +1,12 @@
 # Release APK for physical arm64 devices.
 # -m:1 avoids flaky out-of-proc MSBuild task-host crashes during Android packaging.
 $ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+
+# Stale nested obj (e.g. AlcoRats.Bot) can leak into the shared project as duplicate AssemblyInfo.
+dotnet clean (Join-Path $PSScriptRoot 'AlcoRats.Android.csproj') -c Release -v:q | Out-Null
+Remove-Item -Recurse -Force (Join-Path $root 'obj'), (Join-Path $root 'bin') -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force (Join-Path $PSScriptRoot 'obj'), (Join-Path $PSScriptRoot 'bin') -ErrorAction SilentlyContinue
 
 dotnet publish AlcoRats.Android.csproj `
   -c Release `

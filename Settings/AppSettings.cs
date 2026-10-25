@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -19,6 +19,9 @@ public class AppSettings
 
     public string Password { get; set; } = "";
 
+    /// <summary>Jitsi room path segment on the meet host (e.g. AlcoRats).</summary>
+    public string RoomName { get; set; } = "AlcoRats";
+
     public string RoomPassword { get; set; } = "1992";
 
     public string UserEnter { get; set; } = "{User}, закотился";
@@ -26,6 +29,9 @@ public class AppSettings
     public string UserLeave { get; set; } = "{User}, выкатился";
 
     public bool ToolbarAlwaysVisible { get; set; } = true;
+
+    /// <summary>Piper voice id: irina | dmitri | denis | ruslan.</summary>
+    public string TtsVoice { get; set; } = "irina";
 
     [JsonIgnore]
     public static string SettingsFilePath { get; } = Path.Combine(

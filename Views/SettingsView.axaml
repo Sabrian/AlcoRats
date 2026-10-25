@@ -15,7 +15,7 @@
         <vm:SettingsViewModel />
     </Design.DataContext>
 
-    <DockPanel DataContext="{Binding Settings}"	Margin="16">
+    <DockPanel Margin="16">
         <Button x:Name="BackButton"
                 DockPanel.Dock="Bottom"
                 HorizontalAlignment="Right"
@@ -45,41 +45,67 @@
                 <StackPanel Spacing="6">
                     <TextBlock Text="Пользователь"
                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
-                    <TextBox Text="{Binding User}"
-                             PlaceholderText="Имя в конференции" />
+                    <TextBox Text="{Binding Settings.User}"
+                             PlaceholderText="Логин / идентификатор пользователя Jitsi" />
                 </StackPanel>
 
                 <StackPanel Spacing="6">
-                    <TextBlock Text="Пароль"
+                    <TextBlock Text="Пароль пользователя"
                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
-                    <TextBox Text="{Binding Password}"
+                    <TextBox Text="{Binding Settings.Password}"
                              PasswordChar="•"
-                             PlaceholderText="Пароль" />
+                             PlaceholderText="Пароль зарегистрированного пользователя" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Комната"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                    <TextBox Text="{Binding Settings.RoomName}"
+                             PlaceholderText="AlcoRats" />
                 </StackPanel>
 
                 <StackPanel Spacing="6">
                     <TextBlock Text="Пароль комнаты"
                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
-                    <TextBox Text="{Binding RoomPassword}"
+                    <TextBox Text="{Binding Settings.RoomPassword}"
                              PasswordChar="•"
                              PlaceholderText="Пароль защищённой комнаты Jitsi" />
                 </StackPanel>
 
                 <StackPanel Spacing="6">
+                    <TextBlock Text="Голос озвучки"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                    <ComboBox ItemsSource="{Binding TtsVoices}"
+                              SelectedItem="{Binding SelectedTtsVoice}"
+                              HorizontalAlignment="Stretch">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Title}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <TextBlock Text="При смене голоса модель скачается при следующей озвучке (~60–80 МБ)."
+                               Opacity="0.65"
+                               FontSize="12"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
                     <TextBlock Text="Вход пользователя"
                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
-                    <TextBox Text="{Binding UserEnter}"
+                    <TextBox Text="{Binding Settings.UserEnter}"
                              PlaceholderText="{}{User}, входит" />
                 </StackPanel>
 
                 <StackPanel Spacing="6">
                     <TextBlock Text="Выход пользователя"
                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
-                    <TextBox Text="{Binding UserLeave}"
+                    <TextBox Text="{Binding Settings.UserLeave}"
                              PlaceholderText="{}{User}, выходит" />
                 </StackPanel>
 
-                <CheckBox IsChecked="{Binding ToolbarAlwaysVisible}"
+                <CheckBox IsChecked="{Binding Settings.ToolbarAlwaysVisible}"
                           Content="Закрепить нижнюю панель Jitsi" />
             </StackPanel>
         </ScrollViewer>

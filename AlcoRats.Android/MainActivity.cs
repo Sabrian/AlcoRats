@@ -1,5 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
+using AlcoRats.Hosting;
+using AlcoRats.Services;
 using Android;
 using Android.App;
 using Android.Content;
@@ -14,6 +16,7 @@ using AndroidX.Core.App;
 using AndroidX.Core.Content;
 using AndroidX.Core.View;
 using Avalonia.Android;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AlcoRats.Android;
 
@@ -41,6 +44,7 @@ public class MainActivity : AvaloniaMainActivity
 
     private bool _permissionRequestInFlight;
     private bool _mediaSessionStarted;
+    private IConferenceSession? _conference;
 
     protected override void OnCreate(Bundle? savedInstanceState)
     {
@@ -53,12 +57,14 @@ public class MainActivity : AvaloniaMainActivity
         // One runtime permission dialog at a time — parallel RequestPermissions is unreliable
         // and can crash/cancel the first prompt on first launch (esp. Android 13+).
         RequestNextPermission();
+        WireConferenceShadeLifecycle();
     }
 
     /// <summary>
-    /// Edge-to-edge with padding for status/cutout only.
-    /// Do NOT pad the bottom: Jitsi already lifts its toolbox by safe-area-inset-bottom
-    /// (gesture bar). Padding both = empty black gap under the toolbox (see Pixel screenshot).
+    /// Edge-to-edge with padding for all system bars (status, nav, cutout).
+    /// Avalonia chrome (bottom StatusPanel) must sit above the nav bar.
+    /// Jitsi toolbox is pinned to the WebView viewport and its safe-area ::after is
+    /// stripped in the bridge — so padding here does not create a double gap.
     /// </summary>
     private void FitDisplayToDevice()
     {
@@ -89,14 +95,15 @@ public class MainActivity : AvaloniaMainActivity
     {
         public WindowInsetsCompat OnApplyWindowInsets(View? v, WindowInsetsCompat? insets)
         {
-            if (v is null || insets is null)
-                return insets ?? WindowInsetsCompat.Consumed;
+            if (v is null)
+                return insets ?? WindowInsetsCompat.Consumed!;
+            if (insets is null)
+                return WindowInsetsCompat.Consumed!;
 
             var bars = insets.GetInsets(
-                WindowInsetsCompat.Type.SystemBars() | WindowInsetsCompat.Type.DisplayCutout());
-            // Bottom stays 0 — gesture inset is handled inside the WebView by Jitsi.
-            v.SetPadding(bars.Left, bars.Top, bars.Right, 0);
-            return insets.Inset(bars.Left, bars.Top, bars.Right, 0);
+                WindowInsetsCompat.Type.SystemBars() | WindowInsetsCompat.Type.DisplayCutout())!;
+            v.SetPadding(bars.Left, bars.Top, bars.Right, bars.Bottom);
+            return insets.Inset(bars.Left, bars.Top, bars.Right, bars.Bottom)!;
         }
     }
 
@@ -115,6 +122,7 @@ public class MainActivity : AvaloniaMainActivity
         if (!_permissionRequestInFlight)
             RequestNextPermission();
 
+        WireConferenceShadeLifecycle();
         TryStartMediaSession();
     }
 
@@ -127,11 +135,18 @@ public class MainActivity : AvaloniaMainActivity
     protected override void OnStart()
     {
         base.OnStart();
+        WireConferenceShadeLifecycle();
         TryStartMediaSession();
     }
 
     protected override void OnDestroy()
     {
+        if (_conference is not null)
+        {
+            _conference.StateChanged -= OnConferenceStateChangedForShade;
+            _conference = null;
+        }
+
         if (IsFinishing)
         {
             ConferenceMediaSessionService.Stop(this);
@@ -139,6 +154,34 @@ public class MainActivity : AvaloniaMainActivity
         }
 
         base.OnDestroy();
+    }
+
+    private void WireConferenceShadeLifecycle()
+    {
+        if (!AppHost.IsInitialized)
+            return;
+
+        _conference = AppHost.Services.GetService<IConferenceSession>();
+        if (_conference is null)
+            return;
+
+        _conference.StateChanged -= OnConferenceStateChangedForShade;
+        _conference.StateChanged += OnConferenceStateChangedForShade;
+        SyncMediaSessionWithConference(_conference.State);
+    }
+
+    private void OnConferenceStateChangedForShade(ConferenceSessionState state)
+        => RunOnUiThread(() => SyncMediaSessionWithConference(state));
+
+    private void SyncMediaSessionWithConference(ConferenceSessionState state)
+    {
+        if (state.IsActive)
+            TryStartMediaSession();
+        else if (_mediaSessionStarted)
+        {
+            ConferenceMediaSessionService.Stop(this);
+            _mediaSessionStarted = false;
+        }
     }
 
     public override void OnRequestPermissionsResult(
@@ -219,12 +262,30 @@ public class MainActivity : AvaloniaMainActivity
 
     private void TryStartMediaSession()
     {
-        if (_mediaSessionStarted)
+        // Shade / FGS only while actually in a live conference.
+        if (_conference is null && AppHost.IsInitialized)
+            _conference = AppHost.Services.GetService<IConferenceSession>();
+
+        if (_conference is null || !_conference.State.IsActive)
+        {
+            if (_mediaSessionStarted)
+            {
+                ConferenceMediaSessionService.Stop(this);
+                _mediaSessionStarted = false;
+            }
             return;
+        }
 
         // Android 14+ can kill/crash a microphone FGS if RECORD_AUDIO is not granted yet.
         if (ContextCompat.CheckSelfPermission(this, Manifest.Permission.RecordAudio) != Permission.Granted)
             return;
+
+        if (_mediaSessionStarted)
+        {
+            // Refresh notification content while already running.
+            ConferenceMediaSessionService.Start(this);
+            return;
+        }
 
         ConferenceMediaSessionService.Start(this);
         _mediaSessionStarted = true;

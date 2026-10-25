@@ -9,6 +9,14 @@
     <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
     <AndroidPackageFormat>apk</AndroidPackageFormat>
     <AndroidEnableProfiledAot>false</AndroidEnableProfiledAot>
+    <!--
+      ILLink crashes task-host on this app (Avalonia + sherpa-onnx) with
+      MSB4181/MSB4027 and no real trim diagnostics. XA1030 also requires AOT
+      off when PublishTrimmed is false.
+    -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <RunAOTCompilation>false</RunAOTCompilation>
+    <AndroidLinkMode>None</AndroidLinkMode>
     <!-- Pixel / physical devices need arm64; x64 is for the emulator. -->
     <RuntimeIdentifiers>android-arm64;android-x64</RuntimeIdentifiers>
     <RootNamespace>AlcoRats.Android</RootNamespace>

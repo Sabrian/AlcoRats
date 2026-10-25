@@ -158,10 +158,24 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 10) return 'exists';
-          window.__alcoRatsBridgeVersion = 10;
+          if (window.__alcoRatsBridgeVersion === 18) {
+            try {
+              if (typeof window.__alcoRatsFillCredentials === 'function')
+                window.__alcoRatsFillCredentials();
+              if (typeof window.__alcoRatsDismissDeepLink === 'function')
+                window.__alcoRatsDismissDeepLink();
+              if (typeof window.__alcoRatsEnterHomeFromWelcome === 'function')
+                window.__alcoRatsEnterHomeFromWelcome();
+            } catch (eEx) {}
+            return 'exists';
+          }
+          window.__alcoRatsBridgeVersion = 18;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
+          if (window.__alcoRatsUiFixTimer) {
+            clearInterval(window.__alcoRatsUiFixTimer);
+            window.__alcoRatsUiFixTimer = null;
+          }
           // Allow re-subscribe after WebView/bridge reinstall.
           window.__alcoRatsChatSubscribed = false;
 
@@ -206,18 +220,151 @@ public partial class MainView : UserControl
             } catch (e3) {}
           }
 
+          function isChatOpen() {
+            try {
+              if (typeof APP === 'undefined' || !APP.store) return false;
+              var chat = APP.store.getState()['features/chat'] || {};
+              return !!chat.isOpen;
+            } catch (e) {
+              return false;
+            }
+          }
+
+          // Extra px for tile-view scrollport (toolbox is position:fixed overlay).
+          var TILE_SCROLL_EXTRA_PX = 128;
+
+          function ensureToolboxCss() {
+            if (document.getElementById('alcoRatsToolboxFix')) return;
+            var style = document.createElement('style');
+            style.id = 'alcoRatsToolboxFix';
+            // Hide toolbox on prejoin/lobby; kill safe-area ::after; expand tile scroll area.
+            style.textContent = [
+              'html.alcoRats-prejoin .new-toolbox,',
+              'html.alcoRats-prejoin #new-toolbox {',
+              '  display: none !important; visibility: hidden !important;',
+              '  pointer-events: none !important;',
+              '}',
+              '.new-toolbox { transition: none !important; }',
+              '.toolbox-content-wrapper::after {',
+              '  content: none !important; display: none !important;',
+              '  padding: 0 !important; height: 0 !important;',
+              '}',
+              '.toolbox-content, .toolbox-content-mobile { margin-bottom: 0 !important; }',
+              /* Jitsi shrinks #remoteVideos by toolbar height → tiny overflow + scrollbar.
+                 Toolbox is fixed overlay, so reclaim 100% and add a constant. */
+              '.tile-view .filmstrip #remoteVideos,',
+              '.tile-view .filmstrip.collapse #remoteVideos {',
+              '  height: calc(100% + ' + TILE_SCROLL_EXTRA_PX + 'px) !important;',
+              '  margin-bottom: 0 !important;',
+              '}',
+              '.tile-view .remote-videos,',
+              '.tile-view .filmstrip.collapse .remote-videos {',
+              '  overflow: hidden !important;',
+              '  max-height: none !important;',
+              '}',
+              '.tile-view .filmstrip__videos.has-scroll { padding-left: 0 !important; }'
+            ].join('\\n');
+            (document.head || document.documentElement).appendChild(style);
+          }
+
+          function expandTileScrollArea() {
+            try {
+              ensureToolboxCss();
+              // react-window may set overflow via element.style — force-hide scrollbar.
+              var nodes = document.querySelectorAll(
+                '.tile-view .remote-videos, .tile-view .remote-videos > div, #remoteVideos');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                if (!el || !el.style) continue;
+                el.style.setProperty('overflow', 'hidden', 'important');
+                el.style.setProperty('overflow-y', 'hidden', 'important');
+              }
+            } catch (e) {}
+          }
+
+          // Snap the button row to the visual viewport bottom (same place chat input uses).
+          // On prejoin/lobby the toolbox must stay hidden (alwaysVisible still paints it).
+          function pinToolboxToBottom() {
+            try {
+              ensureToolboxCss();
+              var root = document.querySelector('.new-toolbox') || document.querySelector('#new-toolbox');
+              var active = typeof isConferenceActive === 'function' && isConferenceActive();
+              try {
+                document.documentElement.classList.toggle('alcoRats-prejoin', !active);
+              } catch (e0) {}
+
+              if (!root) return;
+
+              if (!active) {
+                root.style.setProperty('display', 'none', 'important');
+                root.style.setProperty('visibility', 'hidden', 'important');
+                root.style.removeProperty('transform');
+                root.__alcoRatsTy = 0;
+                return;
+              }
+
+              root.style.removeProperty('display');
+              root.style.removeProperty('visibility');
+
+              if (isChatOpen()) {
+                root.style.removeProperty('transform');
+                root.__alcoRatsTy = 0;
+                return;
+              }
+
+              var items = root.querySelector('.toolbox-content-items')
+                || root.querySelector('.toolbox-content')
+                || root;
+              if (!items.getBoundingClientRect) return;
+
+              root.style.setProperty('position', 'fixed', 'important');
+              root.style.setProperty('left', '0', 'important');
+              root.style.setProperty('right', '0', 'important');
+              root.style.setProperty('bottom', '0', 'important');
+              root.style.setProperty('width', '100%', 'important');
+
+              var rect = items.getBoundingClientRect();
+              if (!rect.height) return;
+
+              var viewBottom = window.innerHeight;
+              if (window.visualViewport) {
+                viewBottom = window.visualViewport.offsetTop + window.visualViewport.height;
+              }
+
+              var gap = viewBottom - rect.bottom;
+              if (Math.abs(gap) < 0.5) return;
+
+              var ty = (root.__alcoRatsTy || 0) + gap;
+              if (ty > 240) ty = 240;
+              if (ty < -240) ty = -240;
+              root.__alcoRatsTy = ty;
+              root.style.setProperty('transform', 'translateY(' + ty + 'px)', 'important');
+            } catch (e) {}
+          }
+
           forceRussianUi();
+          pinToolboxToBottom();
+          expandTileScrollArea();
           if (!window.__alcoRatsUiFixTimer) {
-            var uiFixTicks = 0;
             window.__alcoRatsUiFixTimer = setInterval(function () {
               forceRussianUi();
-              uiFixTicks++;
-              if (uiFixTicks > 40) {
-                clearInterval(window.__alcoRatsUiFixTimer);
-                window.__alcoRatsUiFixTimer = null;
-              }
-            }, 250);
+              pinToolboxToBottom();
+              expandTileScrollArea();
+            }, 500);
           }
+          try {
+            window.addEventListener('resize', function () {
+              pinToolboxToBottom();
+              expandTileScrollArea();
+            });
+            if (window.visualViewport) {
+              window.visualViewport.addEventListener('resize', function () {
+                pinToolboxToBottom();
+                expandTileScrollArea();
+              });
+              window.visualViewport.addEventListener('scroll', pinToolboxToBottom);
+            }
+          } catch (e) {}
 
           function addParticipant(byId, p, isLocal) {
             if (!p || typeof p !== 'object') return;
@@ -441,26 +588,194 @@ public partial class MainView : UserControl
             } catch (e) {}
           }
 
+          function isVisibleElement(el) {
+            if (!el || !el.getBoundingClientRect) return false;
+            try {
+              var r = el.getBoundingClientRect();
+              if (r.width < 2 || r.height < 2) return false;
+              var s = window.getComputedStyle(el);
+              if (!s || s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
+                return false;
+              return true;
+            } catch (e) {
+              return false;
+            }
+          }
+
           function setInputValue(input, value) {
             if (!input) return;
             try {
+              var lastValue = input.value;
               var proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
               var descriptor = proto && Object.getOwnPropertyDescriptor(proto, 'value');
               if (descriptor && descriptor.set)
                 descriptor.set.call(input, value);
               else
                 input.value = value;
+
+              // React controlled inputs ignore plain .value unless the tracker is reset.
+              var tracker = input._valueTracker;
+              if (tracker && typeof tracker.setValue === 'function')
+                tracker.setValue(lastValue);
+
+              try { input.focus(); } catch (eF) {}
               input.dispatchEvent(new Event('input', { bubbles: true }));
               input.dispatchEvent(new Event('change', { bubbles: true }));
+              try {
+                input.dispatchEvent(new InputEvent('input', {
+                  bubbles: true,
+                  data: value,
+                  inputType: 'insertReplacementText'
+                }));
+              } catch (eIn) {}
             } catch (e) {
               try { input.value = value; } catch (e2) {}
             }
           }
 
+          function pageVisibleText() {
+            try {
+              return ((document.body && (document.body.innerText || document.body.textContent)) || '')
+                .toLowerCase();
+            } catch (e) {
+              return '';
+            }
+          }
+
+          function inputMeta(el) {
+            return (
+              (el.name || '') + ' ' +
+              (el.id || '') + ' ' +
+              (el.placeholder || '') + ' ' +
+              (el.getAttribute('aria-label') || '') + ' ' +
+              (el.getAttribute('autocomplete') || '') + ' ' +
+              (el.getAttribute('data-testid') || '')
+            ).toLowerCase();
+          }
+
+          // Registered-user JWT/login dialog («Требуется авторизация»), not room lock.
+          function isUserLoginDialogVisible() {
+            var text = pageVisibleText();
+            if (text.indexOf('требуется авторизация') >= 0
+                || text.indexOf('authentication required') >= 0
+                || text.indexOf('login required') >= 0
+                || text.indexOf('идентификатор пользователя') >= 0
+                || text.indexOf('пароль пользователя') >= 0
+                || text.indexOf('user identifier') >= 0
+                || text.indexOf('user password') >= 0)
+              return true;
+
+            // Heuristic: visible username-like field + password field together.
+            try {
+              var user = null, pass = null;
+              var inputs = document.querySelectorAll('input');
+              for (var i = 0; i < inputs.length; i++) {
+                var el = inputs[i];
+                if (!isVisibleElement(el)) continue;
+                var type = (el.type || 'text').toLowerCase();
+                var meta = inputMeta(el);
+                if (type === 'password')
+                  pass = el;
+                else if (type === 'text' || type === 'email' || type === 'username' || type === '') {
+                  if (meta.indexOf('user') >= 0
+                      || meta.indexOf('login') >= 0
+                      || meta.indexOf('ident') >= 0
+                      || meta.indexOf('пользовател') >= 0
+                      || meta.indexOf('логин') >= 0)
+                    user = el;
+                }
+              }
+              return !!(user && pass);
+            } catch (e) {
+              return false;
+            }
+          }
+
+          function findUserLoginFields() {
+            var user = null;
+            var pass = null;
+            try {
+              var inputs = document.querySelectorAll('input');
+              for (var i = 0; i < inputs.length; i++) {
+                var el = inputs[i];
+                if (!isVisibleElement(el)) continue;
+                var type = (el.type || 'text').toLowerCase();
+                var meta = inputMeta(el);
+                if (type === 'password') {
+                  if (!pass) pass = el;
+                  continue;
+                }
+                if (type !== 'text' && type !== 'email' && type !== 'username' && type !== '')
+                  continue;
+                if (meta.indexOf('user') >= 0
+                    || meta.indexOf('login') >= 0
+                    || meta.indexOf('ident') >= 0
+                    || meta.indexOf('пользовател') >= 0
+                    || meta.indexOf('логин') >= 0
+                    || meta.indexOf('name') >= 0) {
+                  user = el;
+                }
+              }
+              // Login dialog always has a password; username may be unlabeled — take first text.
+              if (pass && !user) {
+                for (var j = 0; j < inputs.length; j++) {
+                  var t = inputs[j];
+                  if (!isVisibleElement(t) || t === pass) continue;
+                  var tt = (t.type || 'text').toLowerCase();
+                  if (tt === 'text' || tt === 'email' || tt === 'username' || tt === '') {
+                    user = t;
+                    break;
+                  }
+                }
+              }
+            } catch (e) {}
+            return { user: user, password: pass };
+          }
+
           function findRoomPasswordInput() {
-            return document.querySelector('input[name="lockKey"]')
-              || document.querySelector('#passwordRequiredInput')
-              || document.querySelector('input[type="password"]');
+            // Never treat the registered-user login password as a room lock field.
+            if (isUserLoginDialogVisible())
+              return null;
+
+            var selectors = [
+              'input[name="lockKey"]',
+              '#passwordRequiredInput',
+              'input#modal-dialog-pass',
+              '[data-testid*="passwordRequired"] input',
+              '[data-testid*="PasswordRequired"] input',
+              '.password-section input[type="password"]'
+            ];
+            var i, el;
+            for (i = 0; i < selectors.length; i++) {
+              try {
+                var list = document.querySelectorAll(selectors[i]);
+                for (var j = 0; j < list.length; j++) {
+                  if (isVisibleElement(list[j]))
+                    return list[j];
+                }
+              } catch (eSel) {}
+            }
+
+            // Fallback: lone visible password field (room lock), not a login form.
+            try {
+              var passwords = [];
+              var inputs = document.querySelectorAll('input');
+              for (i = 0; i < inputs.length; i++) {
+                el = inputs[i];
+                if (!isVisibleElement(el)) continue;
+                var meta = inputMeta(el);
+                var type = (el.type || '').toLowerCase();
+                if (type === 'password'
+                    || meta.indexOf('lockkey') >= 0
+                    || meta.indexOf('passcode') >= 0
+                    || meta.indexOf('room password') >= 0
+                    || meta.indexOf('пароль комнат') >= 0)
+                  passwords.push(el);
+              }
+              if (passwords.length === 1)
+                return passwords[0];
+            } catch (eAll) {}
+            return null;
           }
 
           function fillRoomPasswordIfNeeded() {
@@ -469,31 +784,202 @@ public partial class MainView : UserControl
               if (!password) return;
               var input = findRoomPasswordInput();
               if (!input) return;
-              // Only fill while the dialog field is empty / not yet matching saved password.
               if (input.value === password) return;
               setInputValue(input, password);
+              setTimeout(function () {
+                try {
+                  var again = findRoomPasswordInput();
+                  if (again && again.value !== password)
+                    setInputValue(again, password);
+                } catch (e2) {}
+              }, 50);
             } catch (e) {}
+          }
+
+          function fillUserLoginIfNeeded() {
+            try {
+              if (!isUserLoginDialogVisible())
+                return;
+              var user = window.__alcoRatsUser || '';
+              var password = window.__alcoRatsUserPassword || '';
+              if (!user && !password)
+                return;
+
+              var fields = findUserLoginFields();
+              if (user && fields.user && fields.user.value !== user)
+                setInputValue(fields.user, user);
+              if (password && fields.password && fields.password.value !== password)
+                setInputValue(fields.password, password);
+
+              setTimeout(function () {
+                try {
+                  if (!isUserLoginDialogVisible()) return;
+                  var again = findUserLoginFields();
+                  if (user && again.user && again.user.value !== user)
+                    setInputValue(again.user, user);
+                  if (password && again.password && again.password.value !== password)
+                    setInputValue(again.password, password);
+                } catch (e2) {}
+              }, 50);
+            } catch (e) {}
+          }
+
+          function fillCredentialsIfNeeded() {
+            fillUserLoginIfNeeded();
+            fillRoomPasswordIfNeeded();
+          }
+
+          // Fallback when config.disableDeepLinking is ignored by the deployment:
+          // auto-press “Join in browser” / «Присоединиться в браузере».
+          function dismissDeepLinkingPrompt() {
+            try {
+              var nodes = document.querySelectorAll('a, button, [role="button"], div[class*="button"]');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                if (!isVisibleElement(el)) continue;
+                var label = (
+                  (el.innerText || el.textContent || '') + ' ' +
+                  (el.getAttribute('aria-label') || '') + ' ' +
+                  (el.getAttribute('href') || '')
+                ).toLowerCase().replace(/\s+/g, ' ').trim();
+                if (!label) continue;
+                if (label.indexOf('join in browser') >= 0
+                    || label.indexOf('continue in browser') >= 0
+                    || label.indexOf('launch in web') >= 0
+                    || label.indexOf('присоединиться в браузер') >= 0
+                    || label.indexOf('продолжить в браузер') >= 0
+                    || label.indexOf('открыть в браузер') >= 0
+                    || label.indexOf('войти через браузер') >= 0) {
+                  el.click();
+                  return true;
+                }
+              }
+            } catch (e) {}
+            return false;
+          }
+
+          function isJitsiWelcomePage() {
+            try {
+              if (typeof isConferenceActive === 'function' && isConferenceActive())
+                return false;
+              if (findRoomPasswordInput())
+                return false;
+
+              var text = ((document.body && (document.body.innerText || document.body.textContent)) || '')
+                .toLowerCase();
+              if (text.indexOf('создать конференцию') >= 0
+                  || text.indexOf('create meeting') >= 0
+                  || text.indexOf('start meeting') >= 0
+                  || text.indexOf('go') >= 0 && text.indexOf('enter the name') >= 0)
+                return true;
+
+              // Root path with a visible room-name field = welcome screen.
+              var path = (location.pathname || '/').replace(/\/+$/, '') || '/';
+              if (path === '/') {
+                var inputs = document.querySelectorAll('input');
+                for (var i = 0; i < inputs.length; i++) {
+                  if (!isVisibleElement(inputs[i])) continue;
+                  var t = (inputs[i].type || 'text').toLowerCase();
+                  if (t === 'text' || t === 'search' || t === '')
+                    return true;
+                }
+              }
+            } catch (e) {}
+            return false;
+          }
+
+          function trySubmitWelcomeWithRoomName(roomName) {
+            try {
+              var inputs = document.querySelectorAll('input');
+              var field = null;
+              for (var i = 0; i < inputs.length; i++) {
+                if (!isVisibleElement(inputs[i])) continue;
+                var t = (inputs[i].type || 'text').toLowerCase();
+                if (t === 'text' || t === 'search' || t === '') {
+                  field = inputs[i];
+                  break;
+                }
+              }
+              if (!field) return false;
+              setInputValue(field, roomName);
+
+              var buttons = document.querySelectorAll('button, a, [role="button"]');
+              for (var j = 0; j < buttons.length; j++) {
+                var b = buttons[j];
+                if (!isVisibleElement(b)) continue;
+                var label = ((b.innerText || b.textContent || '') + ' ' + (b.getAttribute('aria-label') || ''))
+                  .toLowerCase();
+                if (label.indexOf('создать конференцию') >= 0
+                    || label.indexOf('create meeting') >= 0
+                    || label.indexOf('start meeting') >= 0
+                    || label.indexOf('go') === 0
+                    || label === 'go') {
+                  b.click();
+                  return true;
+                }
+              }
+            } catch (e) {}
+            return false;
+          }
+
+          function enterHomeRoomFromWelcome() {
+            try {
+              if (window.__alcoRatsRedirectingHome) return;
+              if (!isJitsiWelcomePage()) return;
+
+              var homeUrl = window.__alcoRatsHomeRoomUrl;
+              var roomName = window.__alcoRatsHomeRoomName || 'AlcoRats';
+              if (!homeUrl && !roomName) return;
+
+              window.__alcoRatsRedirectingHome = true;
+              if (homeUrl) {
+                try {
+                  location.replace(homeUrl);
+                  return;
+                } catch (eNav) {}
+              }
+              if (!trySubmitWelcomeWithRoomName(roomName))
+                window.__alcoRatsRedirectingHome = false;
+            } catch (e) {
+              window.__alcoRatsRedirectingHome = false;
+            }
           }
 
           window.__alcoRatsPublishConference = publish;
           window.__alcoRatsFillRoomPassword = fillRoomPasswordIfNeeded;
+          window.__alcoRatsFillCredentials = fillCredentialsIfNeeded;
+          window.__alcoRatsDismissDeepLink = dismissDeepLinkingPrompt;
+          window.__alcoRatsEnterHomeFromWelcome = enterHomeRoomFromWelcome;
           window.__alcoRatsBridgeTimer = setInterval(publish, 1500);
-          window.__alcoRatsPasswordTimer = setInterval(fillRoomPasswordIfNeeded, 400);
+          if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
+          window.__alcoRatsPasswordTimer = setInterval(function () {
+            fillCredentialsIfNeeded();
+            dismissDeepLinkingPrompt();
+            enterHomeRoomFromWelcome();
+          }, 300);
           setTimeout(publish, 300);
-          setTimeout(fillRoomPasswordIfNeeded, 200);
+          setTimeout(fillCredentialsIfNeeded, 200);
+          setTimeout(dismissDeepLinkingPrompt, 200);
+          setTimeout(dismissDeepLinkingPrompt, 800);
+          setTimeout(enterHomeRoomFromWelcome, 250);
+          setTimeout(enterHomeRoomFromWelcome, 900);
 
           ensureChatSubscribe();
 
           try {
-            if (!window.__alcoRatsPasswordObserver) {
-              window.__alcoRatsPasswordObserver = new MutationObserver(function () {
-                fillRoomPasswordIfNeeded();
-              });
-              window.__alcoRatsPasswordObserver.observe(document.documentElement || document.body, {
-                childList: true,
-                subtree: true
-              });
-            }
+            if (window.__alcoRatsPasswordObserver)
+              window.__alcoRatsPasswordObserver.disconnect();
+            window.__alcoRatsPasswordObserver = new MutationObserver(function () {
+              fillCredentialsIfNeeded();
+              dismissDeepLinkingPrompt();
+              enterHomeRoomFromWelcome();
+            });
+            window.__alcoRatsPasswordObserver.observe(document.documentElement || document.body, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['class', 'style', 'open']
+            });
           } catch (e) {}
 
           return 'ok';
@@ -667,6 +1153,8 @@ public partial class MainView : UserControl
         {
             _conferenceActive = active;
             // Hang up is done from Jitsi toolbar; hide the whole status bar while in call.
+            // Collapsing the Auto row shrinks WebViewHost so NativeWebView cannot cover the bar
+            // when it is shown again (prejoin / welcome).
             StatusPanel.IsVisible = !active;
             ConferenceActionButton.IsVisible = !active;
         }
@@ -739,9 +1227,9 @@ public partial class MainView : UserControl
             _settingsTransform.X = width;
             SettingsOverlay.IsVisible = true;
             SettingsOverlay.IsHitTestVisible = true;
+            _settingsOpen = true;
 
             await SlideSettingsAsync(from: width, to: 0);
-            _settingsOpen = true;
             SettingsPage.Focus();
         }
         finally
@@ -844,7 +1332,9 @@ public partial class MainView : UserControl
 
     private Uri ResolveRoomUrl()
     {
-        var url = (DataContext as MainViewModel)?.RoomUrl ?? MainViewModel.DefaultRoomUri;
+        var url = MainViewModel.BuildRoomUri(_settings.RoomName);
+        if (DataContext is MainViewModel vm)
+            vm.RoomUrl = url;
         return ApplyRoomUrlConfig(url);
     }
 
@@ -855,7 +1345,10 @@ public partial class MainView : UserControl
         var parameters = new List<(string Key, string Value)>
         {
             ("lang", "ru"),
-            ("config.defaultLanguage", "\"ru\"")
+            ("config.defaultLanguage", "\"ru\""),
+            // Skip mobile “open in app / join in browser” interstitial inside our WebView.
+            ("config.disableDeepLinking", "true"),
+            ("config.deeplinking.disabled", "true")
         };
 
         if (_settings.ToolbarAlwaysVisible)
@@ -915,7 +1408,7 @@ public partial class MainView : UserControl
             _conference.Publish(ConferenceSessionState.Inactive);
             UpdateConferenceActionButton(false);
             await InstallBridgeAsync();
-            await PushRoomPasswordAsync();
+            await PushBridgeContextAsync();
         }
         else
         {
@@ -942,17 +1435,28 @@ public partial class MainView : UserControl
         }
     }
 
-    private async Task PushRoomPasswordAsync()
+    private async Task PushBridgeContextAsync()
     {
         if (!_pageReady || RoomWebView is null)
             return;
 
-        var password = _settings.RoomPassword ?? string.Empty;
-        var escaped = JsonSerializer.Serialize(password);
+        var homeUrl = ResolveRoomUrl().ToString();
+        var roomName = string.IsNullOrWhiteSpace(_settings.RoomName)
+            ? MainViewModel.DefaultRoomName
+            : _settings.RoomName.Trim();
+
         var script =
-            $"(function(){{ window.__alcoRatsRoomPassword = {escaped}; " +
-            "if (typeof window.__alcoRatsFillRoomPassword === 'function') window.__alcoRatsFillRoomPassword(); " +
-            "return 'ok'; }})()";
+            "(function(){" +
+            $"window.__alcoRatsRoomPassword = {JsonSerializer.Serialize(_settings.RoomPassword ?? string.Empty)};" +
+            $"window.__alcoRatsUser = {JsonSerializer.Serialize(_settings.User ?? string.Empty)};" +
+            $"window.__alcoRatsUserPassword = {JsonSerializer.Serialize(_settings.Password ?? string.Empty)};" +
+            $"window.__alcoRatsHomeRoomUrl = {JsonSerializer.Serialize(homeUrl)};" +
+            $"window.__alcoRatsHomeRoomName = {JsonSerializer.Serialize(roomName)};" +
+            "if (typeof window.__alcoRatsFillCredentials === 'function') window.__alcoRatsFillCredentials();" +
+            "else if (typeof window.__alcoRatsFillRoomPassword === 'function') window.__alcoRatsFillRoomPassword();" +
+            "if (typeof window.__alcoRatsEnterHomeFromWelcome === 'function') window.__alcoRatsEnterHomeFromWelcome();" +
+            "return 'ok';" +
+            "})()";
 
         try
         {
@@ -963,6 +1467,9 @@ public partial class MainView : UserControl
             // WebView may not be ready yet.
         }
     }
+
+    private Task PushRoomPasswordAsync()
+        => PushBridgeContextAsync();
 
     private void OnWebMessageReceived(object? sender, WebMessageReceivedEventArgs e)
     {

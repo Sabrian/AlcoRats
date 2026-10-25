@@ -60,12 +60,19 @@ public sealed class ConferenceMediaSessionService : Service
     private static readonly object ToneLock = new();
     private Java.Lang.IRunnable? _clearMicPendingRunnable;
     private Java.Lang.IRunnable? _clearCamPendingRunnable;
+    private const int CollapsedParticipantSlots = 4;
+    private const int ExpandedParticipantSlots = 8;
+
     private readonly int[] _participantContainerIds =
     [
         Resource.Id.participant1,
         Resource.Id.participant2,
         Resource.Id.participant3,
-        Resource.Id.participant4
+        Resource.Id.participant4,
+        Resource.Id.participant5,
+        Resource.Id.participant6,
+        Resource.Id.participant7,
+        Resource.Id.participant8
     ];
 
     private readonly int[] _avatarViewIds =
@@ -73,7 +80,11 @@ public sealed class ConferenceMediaSessionService : Service
         Resource.Id.avatar1,
         Resource.Id.avatar2,
         Resource.Id.avatar3,
-        Resource.Id.avatar4
+        Resource.Id.avatar4,
+        Resource.Id.avatar5,
+        Resource.Id.avatar6,
+        Resource.Id.avatar7,
+        Resource.Id.avatar8
     ];
 
     private readonly int[] _nameViewIds =
@@ -81,7 +92,11 @@ public sealed class ConferenceMediaSessionService : Service
         Resource.Id.name1,
         Resource.Id.name2,
         Resource.Id.name3,
-        Resource.Id.name4
+        Resource.Id.name4,
+        Resource.Id.name5,
+        Resource.Id.name6,
+        Resource.Id.name7,
+        Resource.Id.name8
     ];
 
 
@@ -122,7 +137,19 @@ public sealed class ConferenceMediaSessionService : Service
                 break;
         }
 
-        PublishForeground(_lastState);
+        var state = _conference?.State ?? _lastState;
+        _lastState = state;
+
+        if (!state.IsActive)
+        {
+            // StartForegroundService requires a brief StartForeground — then tear down.
+            EnsureForegroundStartedForCompliance();
+            DismissShade();
+            StopSelf(startId);
+            return StartCommandResult.NotSticky;
+        }
+
+        PublishForeground(state);
         if (_session is not null)
             _session.Active = true;
         UpdatePlaybackState(PlaybackStateCompat.StatePlaying);
@@ -329,7 +356,7 @@ public sealed class ConferenceMediaSessionService : Service
     {
         if (state.IsActive)
         {
-            foreach (var participant in state.Participants.Take(4))
+            foreach (var participant in state.Participants.Take(ExpandedParticipantSlots))
             {
                 if (string.IsNullOrWhiteSpace(participant.AvatarUrl))
                     continue;
@@ -356,10 +383,33 @@ public sealed class ConferenceMediaSessionService : Service
 
     private void PublishForeground(ConferenceSessionState state)
     {
-        var notification = BuildNotification(state);
-        var manager = NotificationManagerCompat.From(this);
-        manager?.Notify(NotificationId, notification);
+        if (!state.IsActive)
+        {
+            DismissShade();
+            return;
+        }
 
+        var notification = BuildNotification(state);
+        StartForegroundWith(notification);
+        NotificationManagerCompat.From(this)?.Notify(NotificationId, notification);
+    }
+
+    /// <summary>Satisfy StartForegroundService contract when we are about to stop without a call.</summary>
+    private void EnsureForegroundStartedForCompliance()
+    {
+        var icon = ApplicationInfo?.Icon ?? global::Android.Resource.Drawable.IcMediaPlay;
+        var placeholder = new NotificationCompat.Builder(this, ChannelId)!
+            .SetSmallIcon(icon)!
+            .SetContentTitle("AlcoRats")!
+            .SetContentText("")!
+            .SetOngoing(false)!
+            .SetOnlyAlertOnce(true)!
+            .Build()!;
+        StartForegroundWith(placeholder);
+    }
+
+    private void StartForegroundWith(Notification notification)
+    {
         if (global::System.OperatingSystem.IsAndroidVersionAtLeast(30))
         {
             StartForeground(
@@ -375,6 +425,28 @@ public sealed class ConferenceMediaSessionService : Service
         {
             StartForeground(NotificationId, notification);
         }
+    }
+
+    private void DismissShade()
+    {
+        try
+        {
+            if (global::System.OperatingSystem.IsAndroidVersionAtLeast(24))
+                StopForeground(StopForegroundFlags.Remove);
+            else
+#pragma warning disable CS0618
+                StopForeground(removeNotification: true);
+#pragma warning restore CS0618
+        }
+        catch
+        {
+            // Service may not have been in foreground yet.
+        }
+
+        NotificationManagerCompat.From(this)?.Cancel(NotificationId);
+
+        if (_session is not null)
+            _session.Active = false;
     }
 
     private void CreateMediaSession()
@@ -459,34 +531,42 @@ public sealed class ConferenceMediaSessionService : Service
             .SetVisibility(NotificationCompat.VisibilityPublic)!
             .SetPriority((int)NotificationPriority.Default)!;
 
-        if (!state.IsActive)
-        {
-            return builder
-                .SetContentTitle("AlcoRats")!
-                .SetContentText("Ожидание конференции…")!
-                .Build()!;
-        }
-
-        var names = string.Join(", ", state.Participants.Take(4).Select(p => p.Name));
+        var names = string.Join(", ", state.Participants.Take(CollapsedParticipantSlots).Select(p => p.Name));
         if (string.IsNullOrWhiteSpace(names))
             names = "Вы в конференции";
 
-        var remoteViews = new RemoteViews(PackageName, Resource.Layout.notification_conference);
-        BindConferenceRemoteViews(remoteViews, state);
+        var collapsed = new RemoteViews(PackageName, Resource.Layout.notification_conference);
+        BindConferenceRemoteViews(collapsed, state, expanded: false);
+
+        // ≤4 people: same compact strip when expanded (no empty 4×2 grid).
+        // >4: big layout with two rows (up to 8).
+        RemoteViews big;
+        if (state.Participants.Count <= CollapsedParticipantSlots)
+        {
+            big = new RemoteViews(PackageName, Resource.Layout.notification_conference);
+            BindConferenceRemoteViews(big, state, expanded: false);
+        }
+        else
+        {
+            big = new RemoteViews(PackageName, Resource.Layout.notification_conference_expanded);
+            BindConferenceRemoteViews(big, state, expanded: true);
+        }
 
         return builder
             .SetContentTitle("Конференция")!
             .SetContentText(names)!
-            .SetCustomContentView(remoteViews)!
-            .SetCustomBigContentView(remoteViews)!
+            .SetCustomContentView(collapsed)!
+            .SetCustomBigContentView(big)!
             .SetStyle(new NotificationCompat.DecoratedCustomViewStyle())!
             .Build()!;
     }
 
-    private void BindConferenceRemoteViews(RemoteViews views, ConferenceSessionState state)
+    private void BindConferenceRemoteViews(RemoteViews views, ConferenceSessionState state, bool expanded)
     {
-        var participants = state.Participants.Take(4).ToList();
-        for (var i = 0; i < _avatarViewIds.Length; i++)
+        var slotCount = expanded ? ExpandedParticipantSlots : CollapsedParticipantSlots;
+        var participants = state.Participants.Take(slotCount).ToList();
+
+        for (var i = 0; i < slotCount; i++)
         {
             var containerId = _participantContainerIds[i];
             var avatarId = _avatarViewIds[i];
@@ -515,11 +595,35 @@ public sealed class ConferenceMediaSessionService : Service
             }
         }
 
-        var extra = Math.Max(0, state.Participants.Count - 4);
-        views.SetTextViewText(
-            Resource.Id.participant_count,
-            extra > 0 ? $"+{extra}" : string.Empty);
+        // Hide unused expanded-only slots when binding collapsed layout (ids absent there).
+        if (!expanded)
+        {
+            var extra = Math.Max(0, state.Participants.Count - CollapsedParticipantSlots);
+            if (extra > 0)
+            {
+                views.SetViewVisibility(Resource.Id.participant_count, ViewStates.Visible);
+                views.SetTextViewText(Resource.Id.participant_count, extra > 9 ? "9+" : $"+{extra}");
+            }
+            else
+            {
+                views.SetViewVisibility(Resource.Id.participant_count, ViewStates.Gone);
+                views.SetTextViewText(Resource.Id.participant_count, string.Empty);
+            }
+        }
+        else
+        {
+            // Second row: hide whole row when ≤4 people so expanded stays compact.
+            var row2Visible = state.Participants.Count > CollapsedParticipantSlots;
+            views.SetViewVisibility(
+                Resource.Id.avatar_row2,
+                row2Visible ? ViewStates.Visible : ViewStates.Gone);
+        }
 
+        BindConferenceControls(views, state);
+    }
+
+    private void BindConferenceControls(RemoteViews views, ConferenceSessionState state)
+    {
         views.SetImageViewResource(
             Resource.Id.btn_mic,
             _micPending
@@ -558,7 +662,8 @@ public sealed class ConferenceMediaSessionService : Service
     private static string TruncateName(string? name)
     {
         var value = string.IsNullOrWhiteSpace(name) ? "Участник" : name.Trim();
-        return value.Length <= 10 ? value : value[..10] + "...";
+        // Narrow 40dp cells in the shade — keep labels short.
+        return value.Length <= 7 ? value : value[..7] + "…";
     }
 
     private Color ResolveNameTextColor()

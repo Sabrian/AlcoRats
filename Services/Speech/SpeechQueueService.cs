@@ -16,15 +16,20 @@ public sealed class SpeechQueueService : IDisposable
         new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
 
     private readonly ITtsEngine _engine;
+    private readonly TtsTextNormalizer _normalizer;
     private readonly ILogger<SpeechQueueService> _logger;
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _initGate = new(1, 1);
     private int _workerStarted;
     private bool _engineReady;
 
-    public SpeechQueueService(ITtsEngine engine, ILogger<SpeechQueueService> logger)
+    public SpeechQueueService(
+        ITtsEngine engine,
+        TtsTextNormalizer normalizer,
+        ILogger<SpeechQueueService> logger)
     {
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
+        _normalizer = normalizer ?? throw new ArgumentNullException(nameof(normalizer));
         _logger = logger;
     }
 
@@ -35,11 +40,15 @@ public sealed class SpeechQueueService : IDisposable
         if (string.IsNullOrWhiteSpace(text))
             return;
 
+        var normalized = _normalizer.Normalize(text);
+        if (string.IsNullOrWhiteSpace(normalized))
+            return;
+
         EnsureWorker();
-        if (!_queue.Writer.TryWrite(text.Trim()))
+        if (!_queue.Writer.TryWrite(normalized))
             _logger.LogWarning("Failed to enqueue TTS utterance");
         else
-            _logger.LogDebug("TTS enqueued: {Text}", text);
+            _logger.LogDebug("TTS enqueued: {Text}", normalized);
     }
 
     public void Shutdown()

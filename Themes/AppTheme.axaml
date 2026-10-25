@@ -4,9 +4,9 @@
         <ResourceDictionary x:Key="Dark">
             <SolidColorBrush x:Key="AppWindowBrush" Color="#0B0B0F" />
             <SolidColorBrush x:Key="AppSurfaceBrush" Color="#1A1A22" />
-            <SolidColorBrush x:Key="StatusBarBackgroundBrush" Color="#252532" />
+            <SolidColorBrush x:Key="StatusBarBackgroundBrush" Color="#040404" />
             <SolidColorBrush x:Key="StatusBarForegroundBrush" Color="#E8E8ED" />
-            <SolidColorBrush x:Key="HangupIconBrush" Color="#FF5252" />
+            <SolidColorBrush x:Key="HangupIconBrush" Color="#E53935" />
         </ResourceDictionary>
 
         <ResourceDictionary x:Key="Light">

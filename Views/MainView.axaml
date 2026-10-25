@@ -10,7 +10,8 @@
              d:DesignHeight="997"
              x:Class="AlcoRats.Views.MainView"
              x:DataType="vm:MainViewModel"
-             Background="{DynamicResource AppSurfaceBrush}">
+             Background="{DynamicResource AppSurfaceBrush}"
+             TopLevel.AutoSafeAreaPadding="False">
 
     <Design.DataContext>
         <vm:MainViewModel />
@@ -20,66 +21,20 @@
       NativeWebView sits above Avalonia in its own region, so do not put
       Avalonia overlays on top of it — they won't be visible on Android.
       Settings overlay hides the WebView while open.
+
+      Grid (*, Auto): WebView fills leftover space; StatusPanel keeps a real row
+      so the native WebView cannot cover the Avalonia bottom bar.
+      System-bar insets are applied by Android MainActivity — do not add them again
+      to StatusPanel (that made the bar look twice as tall).
     -->
     <Panel>
-        <DockPanel x:Name="ConferencePane">
-            <Border x:Name="StatusPanel"
-                    DockPanel.Dock="Bottom"
-                    Background="{DynamicResource StatusBarBackgroundBrush}"
-                    Padding="12,8">
-                <Grid ColumnDefinitions="*,Auto">
-                    <TextBlock x:Name="StatusText"
-                               Grid.Column="0"
-                               Text="Загрузка комнаты…"
-                               Foreground="{DynamicResource StatusBarForegroundBrush}"
-                               FontSize="13"
-                               TextWrapping="Wrap"
-                               VerticalAlignment="Center"
-                               Margin="0,0,8,0" />
-
-                    <StackPanel Grid.Column="1"
-                                Orientation="Horizontal"
-                                Spacing="4"
-                                VerticalAlignment="Center">
-                        <Button x:Name="ConferenceActionButton"
-                                Width="40"
-                                Height="40"
-                                Padding="0"
-                                Background="Transparent"
-                                BorderThickness="0"
-                                HorizontalContentAlignment="Center"
-                                VerticalContentAlignment="Center"
-                                ToolTip.Tip="На страницу подключения"
-                                Click="OnConferenceActionClick">
-                            <materialIcons:MaterialIcon Kind="Home"
-                                                        Width="22"
-                                                        Height="22"
-                                                        Foreground="{DynamicResource StatusBarForegroundBrush}" />
-                        </Button>
-
-                        <Button x:Name="SettingsButton"
-                                Width="40"
-                                Height="40"
-                                Padding="0"
-                                Background="Transparent"
-                                BorderThickness="0"
-                                HorizontalContentAlignment="Center"
-                                VerticalContentAlignment="Center"
-                                ToolTip.Tip="Настройки"
-                                Click="OnSettingsClick">
-                            <materialIcons:MaterialIcon Kind="Cog"
-                                                        Width="22"
-                                                        Height="22"
-                                                        Foreground="{DynamicResource StatusBarForegroundBrush}" />
-                        </Button>
-                    </StackPanel>
-                </Grid>
-            </Border>
-
+        <Grid x:Name="ConferencePane" RowDefinitions="*,Auto">
             <!-- NativeWebView is created at runtime — WebView2 crashes the XAML previewer. -->
             <Panel x:Name="WebViewHost"
+                   Grid.Row="0"
                    HorizontalAlignment="Stretch"
-                   VerticalAlignment="Stretch">
+                   VerticalAlignment="Stretch"
+                   ClipToBounds="True">
                 <Border Background="{DynamicResource AppSurfaceBrush}">
                     <TextBlock Text="Jitsi"
                                HorizontalAlignment="Center"
@@ -88,7 +43,61 @@
                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
                 </Border>
             </Panel>
-        </DockPanel>
+
+            <Border x:Name="StatusPanel"
+                    Grid.Row="1"
+                    Background="{DynamicResource StatusBarBackgroundBrush}"
+                    Padding="10,4">
+                <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock x:Name="StatusText"
+                               Grid.Column="0"
+                               Text="Загрузка комнаты…"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}"
+                               FontSize="12"
+                               TextWrapping="NoWrap"
+                               TextTrimming="CharacterEllipsis"
+                               VerticalAlignment="Center"
+                               Margin="0,0,6,0" />
+
+                    <StackPanel Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="2"
+                                VerticalAlignment="Center">
+                        <Button x:Name="ConferenceActionButton"
+                                Width="36"
+                                Height="36"
+                                Padding="0"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                ToolTip.Tip="На страницу подключения"
+                                Click="OnConferenceActionClick">
+                            <materialIcons:MaterialIcon Kind="Home"
+                                                        Width="20"
+                                                        Height="20"
+                                                        Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                        </Button>
+
+                        <Button x:Name="SettingsButton"
+                                Width="36"
+                                Height="36"
+                                Padding="0"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                ToolTip.Tip="Настройки"
+                                Click="OnSettingsClick">
+                            <materialIcons:MaterialIcon Kind="Cog"
+                                                        Width="20"
+                                                        Height="20"
+                                                        Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
 
         <Border x:Name="SettingsOverlay"
                 IsVisible="False"

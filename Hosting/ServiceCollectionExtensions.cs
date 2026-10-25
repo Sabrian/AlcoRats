@@ -15,6 +15,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<AppSettings>();
         services.AddSingleton<IConferenceSession, ConferenceSession>();
         services.AddSingleton<IAudioPlayer, PlatformAudioPlayer>();
+        services.AddSingleton<TtsTextNormalizer>();
         services.AddSingleton<PiperTtsEngine>();
         services.AddSingleton<SpeechQueueService>();
         services.AddSingleton<ParticipantAnnouncer>();

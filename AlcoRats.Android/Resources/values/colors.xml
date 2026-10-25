@@ -1,5 +1,8 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
   <color name="splash_background">#F2F2F7</color>
   <color name="app_surface">#FFFFFF</color>
+  <!-- Shared accent for notification / action icons -->
+  <color name="icon_red">#E53935</color>
+  <color name="icon_green">#4CAF50</color>
 </resources>

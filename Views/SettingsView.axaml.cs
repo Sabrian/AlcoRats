@@ -11,7 +11,9 @@ public partial class SettingsView : UserControl
 
     public SettingsView()
     {
-        // Avoid inheriting MainViewModel from the parent — compiled bindings cast to SettingsViewModel.
+        // Must set before InitializeComponent / attach: otherwise the control inherits
+        // MainViewModel from MainView and compiled bindings cast it to SettingsViewModel.
+        DataContext = new SettingsViewModel();
         InitializeComponent();
     }
 

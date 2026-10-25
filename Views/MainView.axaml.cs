@@ -40,6 +40,9 @@ public partial class MainView : UserControl
     private readonly TranslateTransform _settingsTransform = new();
     private NativeWebView RoomWebView = null!;
 
+    /// <summary>Last DOM snapshot from <see cref="GetDomModel"/> (debugger / logcat).</summary>
+    public string LastDomModel { get; private set; } = string.Empty;
+
     private const string ToggleMicScript = """
         (function () {
           try {
@@ -159,7 +162,7 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 26) {
+          if (window.__alcoRatsBridgeVersion === 32) {
             try {
               if (typeof window.__alcoRatsFillCredentials === 'function')
                 window.__alcoRatsFillCredentials();
@@ -170,7 +173,7 @@ public partial class MainView : UserControl
             } catch (eEx) {}
             return 'exists';
           }
-          window.__alcoRatsBridgeVersion = 26;
+          window.__alcoRatsBridgeVersion = 32;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           if (window.__alcoRatsUiFixTimer) {
@@ -231,9 +234,10 @@ public partial class MainView : UserControl
             }
           }
 
-          // Working baseline (pre panel-inset experiments): slight extra height for tiles,
-          // hide toolbox on prejoin, no getUserMedia monkey-patch, no resize storms.
-          var TILE_SCROLL_EXTRA_PX = 96;
+          // From android.dom.txt: toolbox ~64px; #remoteVideos already shortened.
+          // Scroll lives on `.remote-videos` (inline overflow:auto). Jitsi CSS uses
+          // `overflow: hidden auto !important` — stylesheet alone cannot win; set inline.
+          var TOOLBOX_RESERVE_PX = 72;
 
           function ensureToolboxCss() {
             var style = document.getElementById('alcoRatsToolboxFix');
@@ -254,31 +258,92 @@ public partial class MainView : UserControl
               '  padding: 0 !important; height: 0 !important;',
               '}',
               '.toolbox-content, .toolbox-content-mobile { margin-bottom: 0 !important; }',
-              '.tile-view .filmstrip #remoteVideos,',
-              '.tile-view .filmstrip.collapse #remoteVideos {',
-              '  height: calc(100% + ' + TILE_SCROLL_EXTRA_PX + 'px) !important;',
-              '  margin-bottom: 0 !important;',
+              'html:not(.alcoRats-prejoin) .tile-view .filmstrip #remoteVideos,',
+              'html:not(.alcoRats-prejoin) .tile-view .filmstrip.collapse #remoteVideos,',
+              'html:not(.alcoRats-prejoin) .filmstrip.collapse #remoteVideos {',
+              '  height: calc(100% - ' + TOOLBOX_RESERVE_PX + 'px) !important;',
+              '  margin-bottom: ' + TOOLBOX_RESERVE_PX + 'px !important;',
               '}',
-              '.tile-view .remote-videos,',
-              '.tile-view .filmstrip.collapse .remote-videos {',
-              '  overflow: hidden !important;',
-              '  max-height: none !important;',
+              'html:not(.alcoRats-prejoin) .remote-videos::-webkit-scrollbar {',
+              '  width: 0 !important; height: 0 !important; display: none !important;',
               '}',
               '.tile-view .filmstrip__videos.has-scroll { padding-left: 0 !important; }'
             ].join('\\n');
           }
 
-          function expandTileScrollArea() {
+          function tileHost() {
+            return document.querySelector('.tile-view .remote-videos')
+              || document.querySelector('.filmstrip .remote-videos')
+              || document.querySelector('.remote-videos');
+          }
+
+          function clearTileViewScale() {
             try {
-              ensureToolboxCss();
-              var nodes = document.querySelectorAll(
-                '.tile-view .remote-videos, .tile-view .remote-videos > div, #remoteVideos');
-              for (var i = 0; i < nodes.length; i++) {
-                var el = nodes[i];
-                if (!el || !el.style) continue;
-                el.style.setProperty('overflow', 'hidden', 'important');
-                el.style.setProperty('overflow-y', 'hidden', 'important');
+              window.__alcoRatsTileZoom = 1;
+              var host = tileHost();
+              if (!host) return;
+              host.style.removeProperty('overflow');
+              host.style.removeProperty('overflow-x');
+              host.style.removeProperty('overflow-y');
+              var grid = host.firstElementChild;
+              if (grid) {
+                grid.style.removeProperty('transform');
+                grid.style.removeProperty('transform-origin');
               }
+            } catch (e) {}
+          }
+
+          // DOM (android.dom.txt):
+          //   .remote-videos  height:863px overflow:auto  scrollHeight:909  ← scrollbar
+          //   > div           height:909px  (tile stack wrapper; NOT a tile)
+          //   > div > span.videocontainer  (absolute tiles)
+          // Bug was reading first tile (~223px) as "need" → scale stayed 1.
+          function fitTileViewScale(active) {
+            try {
+              if (!active || !document.querySelector('.tile-view')) {
+                clearTileViewScale();
+                return;
+              }
+              var host = tileHost();
+              if (!host) {
+                clearTileViewScale();
+                return;
+              }
+
+              // Beat Jitsi `overflow: hidden auto !important` every tick (React resets it).
+              host.style.setProperty('overflow', 'hidden', 'important');
+              host.style.setProperty('overflow-x', 'hidden', 'important');
+              host.style.setProperty('overflow-y', 'hidden', 'important');
+              try { host.scrollTop = 0; } catch (eScroll) {}
+
+              var grid = host.firstElementChild;
+              var avail = host.clientHeight || 0;
+              if (!avail || avail < 40) return;
+
+              // Content height = wrapper style.height (909), never the first tile.
+              var need = 0;
+              if (grid && grid.style && grid.style.height)
+                need = parseFloat(grid.style.height) || 0;
+              if (!need && grid)
+                need = grid.offsetHeight || grid.scrollHeight || 0;
+              if (!need)
+                need = host.scrollHeight || 0;
+              if (!need) return;
+
+              var s = need > avail + 2 ? Math.max(0.45, avail / need) : 1;
+              s = Math.round(s * 100) / 100;
+              if (window.__alcoRatsTileZoom === s) return;
+              window.__alcoRatsTileZoom = s;
+
+              if (!grid) return;
+              if (s >= 0.995) {
+                grid.style.removeProperty('transform');
+                grid.style.removeProperty('transform-origin');
+                return;
+              }
+
+              grid.style.transform = 'scale(' + s + ')';
+              grid.style.transformOrigin = 'top center';
             } catch (e) {}
           }
 
@@ -294,42 +359,40 @@ public partial class MainView : UserControl
                 document.documentElement.classList.toggle('alcoRats-prejoin', !active);
               } catch (e0) {}
 
-              if (!root) return;
-
               if (!active) {
-                root.style.setProperty('display', 'none', 'important');
-                root.style.setProperty('visibility', 'hidden', 'important');
-                root.style.removeProperty('transform');
+                clearTileViewScale();
+                if (root) {
+                  root.style.setProperty('display', 'none', 'important');
+                  root.style.setProperty('visibility', 'hidden', 'important');
+                  root.style.removeProperty('transform');
+                }
                 return;
               }
 
-              root.style.removeProperty('display');
-              root.style.removeProperty('visibility');
-              root.style.removeProperty('transform');
-              if (isChatOpen()) return;
+              if (root) {
+                root.style.removeProperty('display');
+                root.style.removeProperty('visibility');
+                root.style.removeProperty('transform');
+                if (!isChatOpen()) {
+                  root.style.setProperty('position', 'fixed', 'important');
+                  root.style.setProperty('left', '0', 'important');
+                  root.style.setProperty('right', '0', 'important');
+                  root.style.setProperty('bottom', '0', 'important');
+                  root.style.setProperty('width', '100%', 'important');
+                }
+              }
 
-              root.style.setProperty('position', 'fixed', 'important');
-              root.style.setProperty('left', '0', 'important');
-              root.style.setProperty('right', '0', 'important');
-              root.style.setProperty('bottom', '0', 'important');
-              root.style.setProperty('width', '100%', 'important');
+              fitTileViewScale(true);
             } catch (e) {}
           }
 
           forceRussianUi();
           pinToolboxToBottom();
-          expandTileScrollArea();
           if (!window.__alcoRatsUiFixTimer) {
-            window.__alcoRatsUiFixTimer = setInterval(function () {
-              pinToolboxToBottom();
-              expandTileScrollArea();
-            }, 1500);
+            window.__alcoRatsUiFixTimer = setInterval(pinToolboxToBottom, 500);
           }
           try {
-            window.addEventListener('resize', function () {
-              pinToolboxToBottom();
-              expandTileScrollArea();
-            });
+            window.addEventListener('resize', pinToolboxToBottom);
           } catch (e) {}
 
           function addParticipant(byId, p, isLocal) {
@@ -465,6 +528,18 @@ public partial class MainView : UserControl
             }
           }
 
+          function participantFingerprint(collected) {
+            try {
+              var ids = (collected.participants || []).map(function (p) {
+                return String(p.id || '') + ':' + (p.local ? '1' : '0');
+              });
+              ids.sort();
+              return (collected.active ? '1' : '0') + '|' + ids.join(',');
+            } catch (e) {
+              return '';
+            }
+          }
+
           function ensureChatSubscribe() {
             try {
               if (window.__alcoRatsChatSubscribed) return;
@@ -472,13 +547,16 @@ public partial class MainView : UserControl
                 return;
               window.__alcoRatsChatSubscribed = true;
               var lastUnread = -1;
+              var lastParts = '';
               APP.store.subscribe(function () {
                 try {
                   var next = collect();
-                  if (next.unreadMessages !== lastUnread) {
-                    lastUnread = next.unreadMessages;
-                    publish();
-                  }
+                  var fp = participantFingerprint(next);
+                  if (next.unreadMessages === lastUnread && fp === lastParts)
+                    return;
+                  lastUnread = next.unreadMessages;
+                  lastParts = fp;
+                  publish();
                 } catch (e) {}
               });
             } catch (e) {}
@@ -502,25 +580,20 @@ public partial class MainView : UserControl
               }
 
               var byId = {};
+              var myId = '';
+              try {
+                if (APP.conference && typeof APP.conference.getMyUserId === 'function')
+                  myId = String(APP.conference.getMyUserId() || '');
+              } catch (eMy) {}
+
               if (APP.store && typeof APP.store.getState === 'function') {
                 var state = APP.store.getState();
                 out.unreadMessages = getUnreadChatCount(state);
                 var pstate = state['features/base/participants'];
+                // Only local + remote maps — scanning other pstate keys caused phantom IDs.
                 if (pstate && typeof pstate === 'object') {
                   addParticipant(byId, pstate.local, true);
                   eachMapLike(pstate.remote, function (p) { addParticipant(byId, p, false); });
-
-                  Object.keys(pstate).forEach(function (key) {
-                    if (key === 'local' || key === 'localScreenShare' || key === 'remote'
-                      || key === 'sortedRemoteParticipants' || key === 'sortedRemoteVirtualScreenshareParticipants'
-                      || key === 'fakeParticipants' || key === 'overlaying' || key === 'raisedHandsQueue'
-                      || key === 'risingHandQueue' || key === 'activeSpeakers' || key === 'dominantSpeaker'
-                      || key === 'pinnedParticipant' || key === 'overwrittenNameList'
-                      || key === 'numberOfNonModeratorParticipants' || key === 'numberOfParticipantsDisabledE2EE'
-                      || key === 'numberOfParticipantsNotSupportingE2EE' || key === 'remoteVideoSources')
-                      return;
-                    addParticipant(byId, pstate[key], false);
-                  });
                 }
               }
 
@@ -528,35 +601,37 @@ public partial class MainView : UserControl
                 try {
                   APP.conference.listMembers().forEach(function (m) {
                     if (!m) return;
-                    var id = String(m.id || (m.getId && m.getId()) || Math.random());
+                    var id = m.id != null ? String(m.id)
+                      : (typeof m.getId === 'function' ? String(m.getId() || '') : '');
+                    if (!id) return;
                     byId[id] = {
                       id: id,
                       name: (m.displayName || m.name || (m.getDisplayName && m.getDisplayName()) || 'Участник'),
                       avatar: (m.avatar || m.avatarUrl || ''),
-                      local: !!(m.local || (APP.conference.getMyUserId && m.id === APP.conference.getMyUserId()))
+                      local: !!(m.local || (myId && id === myId))
                     };
                   });
                 } catch (e) {}
               }
 
+              // Fill missing only — never overwrite store entries; never invent IDs.
               if (Object.keys(byId).length <= 1 && APP.conference && APP.conference._room) {
                 try {
                   var room = APP.conference._room;
-                  if (typeof room.myUserId === 'function') {
-                    var myId = String(room.myUserId());
-                    if (!byId[myId]) {
-                      byId[myId] = { id: myId, name: 'Вы', avatar: '', local: true };
-                    }
-                  }
+                  if (!myId && typeof room.myUserId === 'function')
+                    myId = String(room.myUserId() || '');
+                  if (myId && !byId[myId])
+                    byId[myId] = { id: myId, name: 'Вы', avatar: '', local: true };
                   var parts = room.participants || {};
                   Object.keys(parts).forEach(function (id) {
+                    if (!id || byId[String(id)]) return;
                     var p = parts[id];
                     if (!p) return;
                     byId[String(id)] = {
                       id: String(id),
                       name: (p._displayName || p.getDisplayName && p.getDisplayName() || 'Участник'),
                       avatar: '',
-                      local: false
+                      local: !!(myId && String(id) === myId)
                     };
                   });
                 } catch (e) {}
@@ -953,7 +1028,8 @@ public partial class MainView : UserControl
             }, 700);
           }
 
-          window.__alcoRatsBridgeTimer = setInterval(publish, 2000);
+          // Backup poll; presence also publishes from APP.store.subscribe on id changes.
+          window.__alcoRatsBridgeTimer = setInterval(publish, 1000);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           window.__alcoRatsPasswordTimer = setInterval(scheduleLightDomPass, 1200);
           setTimeout(publish, 400);
@@ -1492,6 +1568,117 @@ public partial class MainView : UserControl
         }
     }
 
+    private const string DomModelScript = """
+        (function () {
+          function pick(el) {
+            if (!el) return null;
+            var cs = window.getComputedStyle ? getComputedStyle(el) : null;
+            return {
+              tag: el.tagName,
+              id: el.id || '',
+              className: (el.className && el.className.baseVal != null)
+                ? String(el.className.baseVal)
+                : String(el.className || ''),
+              style: (el.getAttribute('style') || '').slice(0, 500),
+              clientW: el.clientWidth | 0,
+              clientH: el.clientHeight | 0,
+              scrollW: el.scrollWidth | 0,
+              scrollH: el.scrollHeight | 0,
+              offsetH: el.offsetHeight | 0,
+              overflow: cs ? (cs.overflow + '/' + cs.overflowY) : '',
+              transform: cs ? cs.transform : '',
+              zoom: el.style && el.style.zoom ? el.style.zoom : '',
+              childCount: el.children ? el.children.length : 0
+            };
+          }
+          try {
+            var remote = document.querySelector('#remoteVideos');
+            var host = document.querySelector('.remote-videos');
+            var grid = host && host.firstElementChild;
+            var inner = grid && grid.firstElementChild;
+            var toolbox = document.querySelector('.new-toolbox') || document.querySelector('#new-toolbox');
+            var filmstrip = document.querySelector('.tile-view .filmstrip') || document.querySelector('.filmstrip');
+            var tiles = document.querySelectorAll('.tile-view .videocontainer, .tile-view span.videocontainer');
+            var scrollables = [];
+            var roots = [remote, host, grid, inner, filmstrip].filter(Boolean);
+            for (var i = 0; i < roots.length; i++) {
+              var el = roots[i];
+              if (el.scrollHeight > el.clientHeight + 2)
+                scrollables.push(pick(el));
+            }
+            var model = {
+              href: String(location.href || '').slice(0, 300),
+              htmlClass: document.documentElement.className,
+              bodyClass: document.body ? document.body.className : '',
+              tileView: !!document.querySelector('.tile-view'),
+              tileCount: tiles.length,
+              viewport: { w: window.innerWidth | 0, h: window.innerHeight | 0 },
+              alcoRats: {
+                bridge: window.__alcoRatsBridgeVersion || null,
+                tileZoom: window.__alcoRatsTileZoom || null
+              },
+              filmstrip: pick(filmstrip),
+              remote: pick(remote),
+              host: pick(host),
+              grid: pick(grid),
+              inner: pick(inner),
+              toolbox: pick(toolbox),
+              scrollables: scrollables,
+              outerHTML: (remote || host || document.body).outerHTML.slice(0, 12000)
+            };
+            return JSON.stringify(model);
+          } catch (e) {
+            return JSON.stringify({ error: String(e && e.message || e) });
+          }
+        })()
+        """;
+
+    /// <summary>
+    /// Debugger helper: snapshot Jitsi tile/toolbox DOM from the WebView.
+    /// If called on the UI thread (typical breakpoint), returns "pending…" immediately —
+    /// press Continue, then inspect <see cref="LastDomModel"/> (also written to logcat).
+    /// From a background thread, blocks until the snapshot is ready.
+    /// </summary>
+    public string GetDomModel()
+    {
+        if (RoomWebView is null)
+            return LastDomModel = "no-webview";
+
+        // Waiting on the UI thread deadlocks: InvokeScript completes via a UI callback.
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            _ = CaptureDomModelAsync();
+            return "pending — Continue (F5), then read LastDomModel / logcat GetDomModel";
+        }
+
+        try
+        {
+            return CaptureDomModelAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            return LastDomModel = "error: " + ex.Message;
+        }
+    }
+
+    private async Task<string> CaptureDomModelAsync()
+    {
+        try
+        {
+            var json = await InvokeScriptResultAsync(DomModelScript, timeoutMs: 10000)
+                .ConfigureAwait(false);
+            LastDomModel = string.IsNullOrWhiteSpace(json) ? "(empty/timeout)" : json;
+        }
+        catch (Exception ex)
+        {
+            LastDomModel = "error: " + ex.Message;
+        }
+
+        var preview = LastDomModel.Length > 6000 ? LastDomModel[..6000] + "…" : LastDomModel;
+        _logger.LogWarning("GetDomModel ({Length} chars): {Dom}", LastDomModel.Length, preview);
+        return LastDomModel;
+    }
+
     /// <summary>
     /// Runs WebView JS with a real timeout that cannot deadlock the UI dispatcher.
     /// Avalonia Android completes InvokeScript via a UI-thread callback; awaiting it on
@@ -1500,11 +1687,18 @@ public partial class MainView : UserControl
     /// <returns>True if the script completed; false on timeout.</returns>
     private async Task<bool> InvokeScriptBoundedAsync(string script, int timeoutMs = 4000)
     {
+        var result = await InvokeScriptResultAsync(script, timeoutMs).ConfigureAwait(false);
+        return result is not null;
+    }
+
+    /// <returns>Script result string, or null on timeout / missing WebView.</returns>
+    private async Task<string?> InvokeScriptResultAsync(string script, int timeoutMs = 4000)
+    {
         if (RoomWebView is null)
-            return false;
+            return null;
 
         var webView = RoomWebView;
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         void StartInvoke()
         {
@@ -1514,13 +1708,27 @@ public partial class MainView : UserControl
                 task.ContinueWith(
                     static (t, state) =>
                     {
-                        var source = (TaskCompletionSource<bool>)state!;
+                        var source = (TaskCompletionSource<string?>)state!;
                         if (t.IsFaulted)
                             source.TrySetException(t.Exception!.GetBaseException());
                         else if (t.IsCanceled)
                             source.TrySetCanceled();
                         else
-                            source.TrySetResult(true);
+                        {
+                            string? value = null;
+                            if (t is Task<string?> typedNullable)
+                                value = typedNullable.Result;
+                            else if (t is Task<string> typed)
+                                value = typed.Result;
+                            else
+                            {
+                                var prop = t.GetType().GetProperty("Result");
+                                if (prop != null)
+                                    value = prop.GetValue(t) as string;
+                            }
+
+                            source.TrySetResult(value ?? string.Empty);
+                        }
                     },
                     tcs,
                     CancellationToken.None,
@@ -1544,11 +1752,10 @@ public partial class MainView : UserControl
         if (finished != tcs.Task)
         {
             _logger.LogWarning("InvokeScript timed out after {Timeout}ms", timeoutMs);
-            return false;
+            return null;
         }
 
-        await tcs.Task.ConfigureAwait(false);
-        return true;
+        return await tcs.Task.ConfigureAwait(false);
     }
 
     private Task PushRoomPasswordAsync()
@@ -1577,7 +1784,12 @@ public partial class MainView : UserControl
             {
                 foreach (var item in arr.EnumerateArray())
                 {
-                    var id = item.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? Guid.NewGuid().ToString("N") : Guid.NewGuid().ToString("N");
+                    // Never invent IDs — Guid churn caused false leave+join TTS.
+                    if (!item.TryGetProperty("id", out var idEl))
+                        continue;
+                    var id = idEl.GetString();
+                    if (string.IsNullOrWhiteSpace(id))
+                        continue;
                     var name = item.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? "Участник" : "Участник";
                     var avatar = item.TryGetProperty("avatar", out var avEl) ? avEl.GetString() : null;
                     var local = item.TryGetProperty("local", out var locEl) && locEl.GetBoolean();

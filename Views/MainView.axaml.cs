@@ -162,7 +162,7 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 34) {
+          if (window.__alcoRatsBridgeVersion === 35) {
             try {
               if (typeof window.__alcoRatsFillCredentials === 'function')
                 window.__alcoRatsFillCredentials();
@@ -173,7 +173,7 @@ public partial class MainView : UserControl
             } catch (eEx) {}
             return 'exists';
           }
-          window.__alcoRatsBridgeVersion = 34;
+          window.__alcoRatsBridgeVersion = 35;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           if (window.__alcoRatsUiFixTimer) {
@@ -423,10 +423,36 @@ public partial class MainView : UserControl
             window.addEventListener('resize', pinToolboxToBottom);
           } catch (e) {}
 
+          // Screen-share / SharedVideo / whiteboard are fake Redux participants —
+          // must not appear in the shade list or trigger join/leave TTS.
+          function isNonPersonParticipant(p, idHint) {
+            try {
+              if (!p || typeof p !== 'object') return false;
+              var fake = p.fakeParticipant;
+              if (fake != null && fake !== false && fake !== '')
+                return true;
+              if (p.isVirtualScreenShareParticipant === true
+                  || p.isVirtualScreenshareParticipant === true
+                  || p.virtualScreenShareOwner)
+                return true;
+              var id = idHint != null ? String(idHint)
+                : (p.id != null ? String(p.id) : '');
+              if (id && (/(-v\d+)$/i.test(id) || /-desktop$/i.test(id)
+                  || /_screen/i.test(id) || /-screenshare$/i.test(id)))
+                return true;
+              var name = String(p.name || p.displayName || '');
+              if (/screen share/i.test(name) || /'s screen$/i.test(name)
+                  || /демонстрац/i.test(name) || /\bэкран\b/i.test(name))
+                return true;
+            } catch (e) {}
+            return false;
+          }
+
           function addParticipant(byId, p, isLocal) {
             if (!p || typeof p !== 'object') return;
             var id = p.id != null ? String(p.id) : null;
             if (!id) return;
+            if (isNonPersonParticipant(p, id)) return;
             byId[id] = {
               id: id,
               name: p.name || p.displayName || (isLocal || p.local ? 'Вы' : 'Участник'),
@@ -632,11 +658,22 @@ public partial class MainView : UserControl
                     var id = m.id != null ? String(m.id)
                       : (typeof m.getId === 'function' ? String(m.getId() || '') : '');
                     if (!id) return;
-                    byId[id] = {
+                    var member = {
                       id: id,
                       name: (m.displayName || m.name || (m.getDisplayName && m.getDisplayName()) || 'Участник'),
                       avatar: (m.avatar || m.avatarUrl || ''),
-                      local: !!(m.local || (myId && id === myId))
+                      local: !!(m.local || (myId && id === myId)),
+                      fakeParticipant: m.fakeParticipant
+                        || (typeof m.isHidden === 'function' && m.isHidden() ? 'hidden' : null)
+                    };
+                    if (isNonPersonParticipant(member, id)) return;
+                    // Hidden / recorder bots — not people for shade/TTS.
+                    if (typeof m.isHidden === 'function' && m.isHidden()) return;
+                    byId[id] = {
+                      id: id,
+                      name: member.name,
+                      avatar: member.avatar,
+                      local: member.local
                     };
                   });
                 } catch (e) {}
@@ -655,12 +692,14 @@ public partial class MainView : UserControl
                     if (!id || byId[String(id)]) return;
                     var p = parts[id];
                     if (!p) return;
-                    byId[String(id)] = {
+                    var entry = {
                       id: String(id),
                       name: (p._displayName || p.getDisplayName && p.getDisplayName() || 'Участник'),
                       avatar: '',
                       local: !!(myId && String(id) === myId)
                     };
+                    if (isNonPersonParticipant(entry, id)) return;
+                    byId[String(id)] = entry;
                   });
                 } catch (e) {}
               }

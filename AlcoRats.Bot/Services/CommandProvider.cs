@@ -26,8 +26,6 @@ namespace AlcoRats.Bot.Services
 
         private TelegramBotClient _client;
 
-        private bool _initialized;
-
         private Lock _lock = new Lock();
 
         private void EnsureInitialized()

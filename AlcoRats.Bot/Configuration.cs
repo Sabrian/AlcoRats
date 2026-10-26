@@ -11,6 +11,14 @@ public class Configuration
 
     public string JitsiRoom = "AlcoRats";
 
+    public string JitsiUserLogin = "Ceiling_Cat";
+
+    public string JitsiUserPassword = "Mi6Ohz8joech";
+
+    public string Gravatar = "";
+
+    public string BotName = "[BOT] Ceiling Cat";
+
     public static Configuration Instance { get; private set; } = null!;
 
     static Configuration()

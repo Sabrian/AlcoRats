@@ -331,7 +331,7 @@ public partial class MainView : UserControl
               if (!need) return;
 
               // Extra shrink so active-speaker / selection border clears the toolbox.
-              var FIT_GUTTER_PX = 18;
+              var FIT_GUTTER_PX = 10;
               var fitAvail = Math.max(40, avail - FIT_GUTTER_PX);
               var s = Math.max(0.45, Math.min(1, fitAvail / need));
               s = Math.round(s * 100) / 100;

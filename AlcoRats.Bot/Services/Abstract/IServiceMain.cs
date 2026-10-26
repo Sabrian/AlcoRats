@@ -4,7 +4,7 @@ using System.Text;
 
 namespace AlcoRats.Bot.Services
 {
-    public interface IServiceMain
+    interface IServiceMain
     {
         Task Process();
     }

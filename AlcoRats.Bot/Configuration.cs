@@ -5,7 +5,7 @@ namespace AlcoRats.Bot;
 
 public class Configuration
 {
-    public string TlToken { get; set; } = "6670124184:AAF9ORrkDLCoo5uK4Km-GpHeAzvtNMWt8rU";
+    public string Token { get; set; } = "6670124184:AAF9ORrkDLCoo5uK4Km-GpHeAzvtNMWt8rU";
 
     public string JitsiHost = "https://alkonost-our.site/";
 

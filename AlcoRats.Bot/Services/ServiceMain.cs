@@ -4,18 +4,28 @@ using System.Text;
 
 namespace AlcoRats.Bot.Services
 {
-    public class ServiceMain : IServiceMain
+    class ServiceMain : IServiceMain
     {
         private readonly Configuration _configuration;
 
-        public ServiceMain(Configuration configuration)
+        private readonly ICommandProvider _commandProvider;
+
+        private readonly ICommandProcessor _commandProcessor;
+
+        public ServiceMain(Configuration configuration, ICommandProvider commandProvider, ICommandProcessor commandProcessor)
         {
             _configuration = configuration;
+            _commandProvider = commandProvider;
+            _commandProcessor = commandProcessor;
         }
 
-        public Task Process()
+        public async Task Process()
         {
-            return Task.Delay(10000);
+            while (true)
+            {
+                var command = await _commandProvider.Dequeue();
+                await _commandProcessor.Process(command);
+            }
         }
     }
 }

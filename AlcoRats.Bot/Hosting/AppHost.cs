@@ -58,6 +58,8 @@ public static class AppHost
 
         services.AddSingleton(Configuration.Instance);
         services.AddSingleton<IServiceMain, ServiceMain>();
+        services.AddSingleton<ICommandProcessor, CommandProcessor>();
+        services.AddSingleton<ICommandProvider, CommandProvider>();
 
         configure?.Invoke(services);
 

@@ -7,6 +7,6 @@ namespace AlcoRats.Bot.Services
 {
     interface ICommandProvider
     {
-        Task<Command> Dequeue();
+        Task<ICommand> Dequeue();
     }
 }

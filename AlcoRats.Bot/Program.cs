@@ -20,6 +20,20 @@ internal class Program
                 configuration.JitsiHost,
                 configuration.JitsiRoom);
 
+            var jitsi = services.GetRequiredService<AlcoRats.Bot.Jitsi.IJitsiBotService>();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await jitsi.EnsureStartedAsync();
+                    logger.LogInformation("Jitsi bot ready (IsRunning={IsRunning})", jitsi.IsRunning);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Initial Jitsi start failed; will retry on commands");
+                }
+            });
+
             var main = services.GetRequiredService<IServiceMain>();
             await main.Process();
         }

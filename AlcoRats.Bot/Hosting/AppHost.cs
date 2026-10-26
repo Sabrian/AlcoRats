@@ -1,3 +1,4 @@
+using AlcoRats.Bot.Jitsi;
 using AlcoRats.Bot.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -11,16 +12,16 @@ namespace AlcoRats.Bot.Hosting;
 /// </summary>
 public static class AppHost
 {
-    private static IServiceProvider? _services;
+    private static IServiceProvider _services;
 
     public static IServiceProvider Services
         => _services ?? throw new InvalidOperationException("AppHost is not initialized. Call Initialize() first.");
 
-    public static bool IsInitialized => _services is not null;
+    public static bool IsInitialized => _services != null;
 
-    public static IServiceProvider Initialize(Action<IServiceCollection>? configure = null)
+    public static IServiceProvider Initialize(Action<IServiceCollection> configure = null)
     {
-        if (_services is not null)
+        if (_services != null)
             return _services;
 
         var logDirectory = Path.Combine(
@@ -57,9 +58,12 @@ public static class AppHost
         });
 
         services.AddSingleton(Configuration.Instance);
+        services.AddSingleton<IJitsiBotService, JitsiBotService>();
         services.AddSingleton<IServiceMain, ServiceMain>();
         services.AddSingleton<ICommandProcessor, CommandProcessor>();
-        services.AddSingleton<ICommandProvider, CommandProvider>();
+        services.AddSingleton<ICommandProvider, TelegramCommandProvider>();
+        services.AddSingleton(services => services.GetRequiredService<ICommandProvider>() as IClientProvider);
+        services.AddSingleton<IDatabase, Database>();
 
         configure?.Invoke(services);
 
@@ -80,17 +84,32 @@ public static class AppHost
 
     public static void Shutdown()
     {
-        if (_services is null)
+        if (_services == null)
             return;
 
         try
         {
+            try
+            {
+                // Disconnect from Chromium but keep it alive when attached via debugging port,
+                // so the next process can reconnect to the same session.
+                var jitsi = _services.GetService<IJitsiBotService>();
+                if (jitsi != null)
+                    jitsi.StopAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to stop Jitsi bot during shutdown");
+            }
+
             Log.Information("AlcoRats.Bot host shutting down");
             Log.CloseAndFlush();
         }
         finally
         {
-            if (_services is IDisposable disposable)
+            if (_services is IAsyncDisposable asyncDisposable)
+                asyncDisposable.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            else if (_services is IDisposable disposable)
                 disposable.Dispose();
             _services = null;
         }

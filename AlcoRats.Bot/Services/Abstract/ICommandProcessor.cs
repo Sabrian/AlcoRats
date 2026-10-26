@@ -7,6 +7,6 @@ namespace AlcoRats.Bot.Services
 {
     interface ICommandProcessor
     {
-        Task Process(Command command);
+        Task Process(ICommand command);
     }
 }

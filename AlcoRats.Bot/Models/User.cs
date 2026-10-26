@@ -4,7 +4,7 @@ using System.Text;
 
 namespace AlcoRats.Bot.Models
 {
-    class User
+    class ProviderUser
     {
         public long Id { get; set; }
 

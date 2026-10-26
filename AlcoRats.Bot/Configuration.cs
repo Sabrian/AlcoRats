@@ -1,7 +1,7 @@
 ﻿using System.IO;
 using System.Text.Json;
 
-namespace Vorovayka;
+namespace AlcoRats.Bot;
 
 public class Configuration
 {
@@ -11,13 +11,20 @@ public class Configuration
 
     public string JitsiRoom = "AlcoRats";
 
-    public static Configuration Instance { get; private set; }
+    public static Configuration Instance { get; private set; } = null!;
 
     static Configuration()
     {
         try
         {
-            Instance = JsonSerializer.Deserialize<Configuration>(File.ReadAllText("configuration.json"), new JsonSerializerOptions());
+            if (File.Exists("configuration.json"))
+            {
+                Instance = JsonSerializer.Deserialize<Configuration>(File.ReadAllText("configuration.json")) ?? new Configuration();
+            }
+            else
+            { 
+                Instance = new Configuration(); 
+            }
         }
         catch
         {

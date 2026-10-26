@@ -25,7 +25,7 @@ public static class PiperVoiceCatalog
         new("ruslan", "Руслан (муж.)", "vits-piper-ru_RU-ruslan-medium")
     ];
 
-    public static PiperVoiceInfo Resolve(string? voiceId)
+    public static PiperVoiceInfo Resolve(string voiceId)
     {
         if (string.IsNullOrWhiteSpace(voiceId))
             return All[0];

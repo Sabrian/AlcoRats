@@ -10,30 +10,22 @@ namespace AlcoRats.Services.Speech;
 /// Queued TTS playback. Prefer Piper when registered as <see cref="ITtsEngine"/>.
 /// Engine initialization is deferred until the first speak / explicit warm-up.
 /// </summary>
-public sealed class SpeechQueueService : IDisposable
+public sealed class SpeechQueueService(
+    ITtsEngine engine,
+    TtsTextNormalizer normalizer,
+    ILogger<SpeechQueueService> logger) : IDisposable
 {
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>(
         new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
 
-    private readonly ITtsEngine _engine;
-    private readonly TtsTextNormalizer _normalizer;
-    private readonly ILogger<SpeechQueueService> _logger;
+    private readonly ITtsEngine _engine = engine ?? throw new ArgumentNullException(nameof(engine));
+    private readonly TtsTextNormalizer _normalizer = normalizer ?? throw new ArgumentNullException(nameof(normalizer));
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _initGate = new(1, 1);
     private int _workerStarted;
     private bool _engineReady;
 
-    public SpeechQueueService(
-        ITtsEngine engine,
-        TtsTextNormalizer normalizer,
-        ILogger<SpeechQueueService> logger)
-    {
-        _engine = engine ?? throw new ArgumentNullException(nameof(engine));
-        _normalizer = normalizer ?? throw new ArgumentNullException(nameof(normalizer));
-        _logger = logger;
-    }
-
-    public string? ActiveEngineName => _engine.EngineName;
+    public string ActiveEngineName => _engine.EngineName;
 
     public void Speak(string text)
     {
@@ -46,9 +38,9 @@ public sealed class SpeechQueueService : IDisposable
 
         EnsureWorker();
         if (!_queue.Writer.TryWrite(normalized))
-            _logger.LogWarning("Failed to enqueue TTS utterance");
+            logger.LogWarning("Failed to enqueue TTS utterance");
         else
-            _logger.LogDebug("TTS enqueued: {Text}", normalized);
+            logger.LogDebug("TTS enqueued: {Text}", normalized);
     }
 
     public void Shutdown()
@@ -86,11 +78,11 @@ public sealed class SpeechQueueService : IDisposable
 
             await _engine.InitializeAsync(token).ConfigureAwait(false);
             _engineReady = true;
-            _logger.LogInformation("TTS engine ready: {Engine}", _engine.EngineName);
+            logger.LogInformation("TTS engine ready: {Engine}", _engine.EngineName);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "TTS engine initialization failed");
+            logger.LogWarning(ex, "TTS engine initialization failed");
             throw;
         }
         finally
@@ -116,7 +108,7 @@ public sealed class SpeechQueueService : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "TTS speak failed for text: {Text}", text);
+                    logger.LogError(ex, "TTS speak failed for text: {Text}", text);
                 }
             }
         }

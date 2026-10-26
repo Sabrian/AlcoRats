@@ -10,7 +10,7 @@ namespace AlcoRats.Hosting;
 /// </summary>
 public sealed class GlobalExceptionHandler
 {
-    private static GlobalExceptionHandler? _instance;
+    private static GlobalExceptionHandler _instance;
     private readonly ILogger<GlobalExceptionHandler> _logger;
     private bool _uiHooked;
 
@@ -68,7 +68,7 @@ public sealed class GlobalExceptionHandler
             _logger.LogCritical("Unhandled AppDomain exception object: {ExceptionObject}", e.ExceptionObject);
     }
 
-    private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+    private void OnUnobservedTaskException(object sender, UnobservedTaskExceptionEventArgs e)
     {
         _logger.LogError(e.Exception, "Unobserved task exception");
         e.SetObserved();

@@ -16,7 +16,7 @@ namespace AlcoRats.Hosting;
 /// </summary>
 public static class AppHost
 {
-    private static IServiceProvider? _services;
+    private static IServiceProvider _services;
     private static bool _runtimeStarted;
 
     public static IServiceProvider Services
@@ -24,7 +24,7 @@ public static class AppHost
 
     public static bool IsInitialized => _services is not null;
 
-    public static IServiceProvider Initialize(Action<IServiceCollection>? configurePlatform = null)
+    public static IServiceProvider Initialize(Action<IServiceCollection> configurePlatform = null)
     {
         if (_services is not null)
             return _services;

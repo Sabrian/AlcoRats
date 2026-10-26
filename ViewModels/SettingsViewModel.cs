@@ -6,19 +6,14 @@ using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace AlcoRats.ViewModels;
 
-public partial class SettingsViewModel : ViewModelBase
+public partial class SettingsViewModel(AppSettings settings) : ViewModelBase
 {
     [ObservableProperty]
-    private AppSettings _settings;
+    private AppSettings _settings = settings ?? new AppSettings();
 
     public SettingsViewModel()
         : this(new AppSettings())
     {
-    }
-
-    public SettingsViewModel(AppSettings settings)
-    {
-        _settings = settings ?? new AppSettings();
     }
 
     public IReadOnlyList<PiperVoiceInfo> TtsVoices => PiperVoiceCatalog.All;

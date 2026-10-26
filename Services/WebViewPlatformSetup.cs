@@ -8,7 +8,7 @@ namespace AlcoRats.Services;
 /// </summary>
 public static class WebViewPlatformSetup
 {
-    public static Action<NativeWebView>? Configure { get; set; }
+    public static Action<NativeWebView> Configure { get; set; }
 
     public static void Apply(NativeWebView webView)
         => Configure?.Invoke(webView);

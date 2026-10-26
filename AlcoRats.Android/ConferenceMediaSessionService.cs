@@ -864,13 +864,8 @@ public sealed class ConferenceMediaSessionService : Service
         context.StopService(new Intent(context, typeof(ConferenceMediaSessionService)));
     }
 
-    private sealed class MediaSessionCallback : MediaSessionCompat.Callback
+    private sealed class MediaSessionCallback(ConferenceMediaSessionService service) : MediaSessionCompat.Callback
     {
-        private readonly ConferenceMediaSessionService _service;
-
-        public MediaSessionCallback(ConferenceMediaSessionService service)
-            => _service = service;
-
         public override void OnPlay() => Toggle();
 
         public override void OnPause() => Toggle();
@@ -898,10 +893,10 @@ public sealed class ConferenceMediaSessionService : Service
 
         private void Toggle()
         {
-            _service.MainHandler.Post(() =>
+            service.MainHandler.Post(() =>
             {
-                if (_service.TryToggleMicrophone())
-                    _service.PublishForeground(_service._lastState);
+                if (service.TryToggleMicrophone())
+                    service.PublishForeground(service._lastState);
             });
         }
 

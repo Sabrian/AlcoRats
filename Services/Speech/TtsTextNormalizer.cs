@@ -26,7 +26,7 @@ public sealed class TtsTextNormalizer
     private readonly Dictionary<string, string> _lexicon;
     private readonly string _lexiconPath;
 
-    public TtsTextNormalizer(ILogger<TtsTextNormalizer>? logger = null, string? lexiconPath = null)
+    public TtsTextNormalizer(ILogger<TtsTextNormalizer> logger = null, string lexiconPath = null)
     {
         _logger = logger ?? NullLogger<TtsTextNormalizer>.Instance;
         _lexiconPath = lexiconPath
@@ -42,7 +42,7 @@ public sealed class TtsTextNormalizer
         LoadUserLexicon();
     }
 
-    public string Normalize(string? text)
+    public string Normalize(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
             return string.Empty;

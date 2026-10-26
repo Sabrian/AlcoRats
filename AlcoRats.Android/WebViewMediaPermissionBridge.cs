@@ -128,18 +128,13 @@ public static class WebViewMediaPermissionBridge
         return null;
     }
 
-    private sealed class GrantMediaWebChromeClient : WebChromeClient
+    private sealed class GrantMediaWebChromeClient(WebChromeClient? inner) : WebChromeClient
     {
-        private readonly WebChromeClient? _inner;
-
-        public GrantMediaWebChromeClient(WebChromeClient? inner)
-            => _inner = inner;
-
         public override void OnPermissionRequest(PermissionRequest? request)
         {
             if (request is null)
             {
-                _inner?.OnPermissionRequest(null);
+                inner?.OnPermissionRequest(null);
                 return;
             }
 
@@ -157,13 +152,13 @@ public static class WebViewMediaPermissionBridge
         }
 
         public override void OnPermissionRequestCanceled(PermissionRequest? request)
-            => _inner?.OnPermissionRequestCanceled(request);
+            => inner?.OnPermissionRequestCanceled(request);
 
         public override void OnProgressChanged(global::Android.Webkit.WebView? view, int newProgress)
-            => _inner?.OnProgressChanged(view, newProgress);
+            => inner?.OnProgressChanged(view, newProgress);
 
         public override void OnReceivedTitle(global::Android.Webkit.WebView? view, string? title)
-            => _inner?.OnReceivedTitle(view, title);
+            => inner?.OnReceivedTitle(view, title);
 
         public override bool OnShowFileChooser(
             global::Android.Webkit.WebView? webView,
@@ -238,8 +233,8 @@ public static class WebViewMediaPermissionBridge
             string? origin,
             GeolocationPermissions.ICallback? callback)
         {
-            if (_inner is not null)
-                _inner.OnGeolocationPermissionsShowPrompt(origin, callback);
+            if (inner is not null)
+                inner.OnGeolocationPermissionsShowPrompt(origin, callback);
             else
                 base.OnGeolocationPermissionsShowPrompt(origin, callback);
         }

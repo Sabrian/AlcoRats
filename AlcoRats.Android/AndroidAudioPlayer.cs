@@ -10,14 +10,9 @@ namespace AlcoRats.Android;
 /// <summary>
 /// Android <see cref="IAudioPlayer"/> implementation using MediaPlayer.
 /// </summary>
-public sealed class AndroidAudioPlayer : IAudioPlayer
+public sealed class AndroidAudioPlayer(ILogger<AndroidAudioPlayer>? logger = null) : IAudioPlayer
 {
-    private readonly ILogger<AndroidAudioPlayer> _logger;
-
-    public AndroidAudioPlayer(ILogger<AndroidAudioPlayer>? logger = null)
-    {
-        _logger = logger ?? NullLogger<AndroidAudioPlayer>.Instance;
-    }
+    private readonly ILogger<AndroidAudioPlayer> _logger = logger ?? NullLogger<AndroidAudioPlayer>.Instance;
 
     public async Task PlayWavAsync(string wavPath, CancellationToken cancellationToken = default)
     {

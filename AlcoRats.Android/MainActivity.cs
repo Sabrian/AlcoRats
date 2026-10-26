@@ -335,10 +335,9 @@ public class MainActivity : AvaloniaMainActivity
             ContextCompat.CheckSelfPermission(this, permission) == Permission.Granted);
 
     private string[] GetMissingPermissions(IEnumerable<string> permissions)
-        => permissions
+        => [.. permissions
             .Where(permission =>
-                ContextCompat.CheckSelfPermission(this, permission) != Permission.Granted)
-            .ToArray();
+                ContextCompat.CheckSelfPermission(this, permission) != Permission.Granted)];
 
     private static bool IsPlayPauseKey(KeyEvent e)
         => e.KeyCode is Keycode.MediaPlayPause

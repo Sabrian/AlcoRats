@@ -14,7 +14,7 @@ namespace AlcoRats;
     Url = "https://docs.avaloniaui.net/docs/concepts/view-locator")]
 public class ViewLocator : IDataTemplate
 {
-    public Control? Build(object? param)
+    public Control Build(object param)
     {
         if (param is null)
             return null;
@@ -30,7 +30,7 @@ public class ViewLocator : IDataTemplate
         return new TextBlock { Text = "Not Found: " + name };
     }
 
-    public bool Match(object? data)
+    public bool Match(object data)
     {
         return data is ViewModelBase;
     }

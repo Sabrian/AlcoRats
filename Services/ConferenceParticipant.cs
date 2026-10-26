@@ -3,5 +3,5 @@ namespace AlcoRats.Services;
 public sealed record ConferenceParticipant(
     string Id,
     string Name,
-    string? AvatarUrl,
+    string AvatarUrl,
     bool IsLocal);

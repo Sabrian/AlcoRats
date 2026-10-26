@@ -8,7 +8,7 @@ namespace AlcoRats.Mapping;
 /// </summary>
 public static class MapperConfig
 {
-    private static IMapper? _mapper;
+    private static IMapper _mapper;
 
     /// <summary>
     /// Настроенный маппер; до вызова <see cref="Initialize"/> выбрасывает исключение.

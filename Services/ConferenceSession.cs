@@ -8,25 +8,19 @@ namespace AlcoRats.Services;
 /// <summary>
 /// Cross-platform conference control hub: state from Jitsi WebView + actions from UI/notification/hotkeys.
 /// </summary>
-public sealed class ConferenceSession : IConferenceSession
+public sealed class ConferenceSession(ILogger<ConferenceSession> logger) : IConferenceSession
 {
-    private readonly ILogger<ConferenceSession> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private long _lastMicTicks;
 
-    private Func<Task>? _toggleMicrophoneAsync;
-    private Func<Task>? _toggleCameraAsync;
-    private Func<Task>? _leaveAsync;
-    private Func<Task>? _openChatAsync;
+    private Func<Task> _toggleMicrophoneAsync;
+    private Func<Task> _toggleCameraAsync;
+    private Func<Task> _leaveAsync;
+    private Func<Task> _openChatAsync;
 
     private ConferenceSessionState _state = ConferenceSessionState.Inactive;
 
-    public ConferenceSession(ILogger<ConferenceSession> logger)
-    {
-        _logger = logger;
-    }
-
-    public event Action<ConferenceSessionState>? StateChanged;
+    public event Action<ConferenceSessionState> StateChanged;
 
     public ConferenceSessionState State => _state;
 
@@ -40,7 +34,7 @@ public sealed class ConferenceSession : IConferenceSession
         _toggleCameraAsync = toggleCameraAsync;
         _leaveAsync = leaveAsync;
         _openChatAsync = openChatAsync;
-        _logger.LogInformation("Conference session handlers registered");
+        logger.LogInformation("Conference session handlers registered");
     }
 
     public void Unregister(
@@ -59,7 +53,7 @@ public sealed class ConferenceSession : IConferenceSession
             _openChatAsync = null;
 
         Publish(ConferenceSessionState.Inactive);
-        _logger.LogInformation("Conference session handlers unregistered");
+        logger.LogInformation("Conference session handlers unregistered");
     }
 
     public void Publish(ConferenceSessionState state)
@@ -72,7 +66,7 @@ public sealed class ConferenceSession : IConferenceSession
             || previous.Participants.Count != state.Participants.Count
             || previous.UnreadChatCount != state.UnreadChatCount)
         {
-            _logger.LogDebug(
+            logger.LogDebug(
                 "Conference state: Active={Active}, AudioMuted={AudioMuted}, VideoMuted={VideoMuted}, Participants={Count}, UnreadChat={Unread}",
                 state.IsActive,
                 state.AudioMuted,
@@ -96,11 +90,11 @@ public sealed class ConferenceSession : IConferenceSession
     public Task<bool> OpenChatAsync()
         => InvokeAsync(_openChatAsync, nameof(OpenChatAsync), debounce: false);
 
-    private async Task<bool> InvokeAsync(Func<Task>? handler, string action, bool debounce)
+    private async Task<bool> InvokeAsync(Func<Task> handler, string action, bool debounce)
     {
         if (handler is null)
         {
-            _logger.LogWarning("Conference action skipped — handler missing: {Action}", action);
+            logger.LogWarning("Conference action skipped — handler missing: {Action}", action);
             return false;
         }
 
@@ -117,13 +111,13 @@ public sealed class ConferenceSession : IConferenceSession
 
         try
         {
-            _logger.LogDebug("Conference action: {Action}", action);
+            logger.LogDebug("Conference action: {Action}", action);
             await handler().ConfigureAwait(false);
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Conference action failed: {Action}", action);
+            logger.LogError(ex, "Conference action failed: {Action}", action);
             throw;
         }
         finally

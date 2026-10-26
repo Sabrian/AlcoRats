@@ -12,14 +12,9 @@ namespace AlcoRats.Services.Speech;
 /// <summary>
 /// Default WAV player for Desktop (Windows PlaySound / shell open elsewhere).
 /// </summary>
-public sealed class PlatformAudioPlayer : IAudioPlayer
+public sealed class PlatformAudioPlayer(ILogger<PlatformAudioPlayer> logger = null) : IAudioPlayer
 {
-    private readonly ILogger<PlatformAudioPlayer> _logger;
-
-    public PlatformAudioPlayer(ILogger<PlatformAudioPlayer>? logger = null)
-    {
-        _logger = logger ?? NullLogger<PlatformAudioPlayer>.Instance;
-    }
+    private readonly ILogger<PlatformAudioPlayer> _logger = logger ?? NullLogger<PlatformAudioPlayer>.Instance;
 
     public async Task PlayWavAsync(string wavPath, CancellationToken cancellationToken = default)
     {

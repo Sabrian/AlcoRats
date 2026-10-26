@@ -7,7 +7,7 @@ public interface IConferenceSession
 {
     ConferenceSessionState State { get; }
 
-    event Action<ConferenceSessionState>? StateChanged;
+    event Action<ConferenceSessionState> StateChanged;
 
     void Register(
         Func<Task> toggleMicrophoneAsync,

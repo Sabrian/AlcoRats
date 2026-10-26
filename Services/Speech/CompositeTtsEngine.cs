@@ -8,21 +8,16 @@ namespace AlcoRats.Services.Speech;
 /// <summary>
 /// Prefers the first working engine (Piper), then fallbacks.
 /// </summary>
-public sealed class CompositeTtsEngine : ITtsEngine
+public sealed class CompositeTtsEngine(params ITtsEngine[] engines) : ITtsEngine
 {
-    private readonly IReadOnlyList<ITtsEngine> _engines;
-    private ITtsEngine? _active;
-
-    public CompositeTtsEngine(params ITtsEngine[] engines)
-    {
-        _engines = engines ?? Array.Empty<ITtsEngine>();
-    }
+    private readonly IReadOnlyList<ITtsEngine> _engines = engines ?? Array.Empty<ITtsEngine>();
+    private ITtsEngine _active;
 
     public string EngineName => _active?.EngineName ?? "Composite";
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        Exception? last = null;
+        Exception last = null;
         foreach (var engine in _engines)
         {
             try

@@ -11,7 +11,7 @@ public static class NameSyllableHelper
     private const string RussianVowels = "аеёиоуыэюяАЕЁИОУЫЭЮЯ";
     private const string EnglishVowels = "aeiouyAEIOUY";
 
-    public static string TruncateToSyllables(string? name, int maxSyllables = 10)
+    public static string TruncateToSyllables(string name, int maxSyllables = 10)
     {
         if (string.IsNullOrWhiteSpace(name))
             return "участник";

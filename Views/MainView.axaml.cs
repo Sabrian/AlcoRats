@@ -1213,10 +1213,10 @@ public partial class MainView : UserControl
         });
     }
 
-    private void OnAdapterCreated(object? sender, EventArgs e)
+    private void OnAdapterCreated(object sender, EventArgs e)
         => WebViewPlatformSetup.Apply(RoomWebView);
 
-    private void OnAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
+    private void OnAttachedToVisualTree(object sender, VisualTreeAttachmentEventArgs e)
     {
         _conference.Register(
             _toggleMicrophoneHandler,
@@ -1230,7 +1230,7 @@ public partial class MainView : UserControl
         _ = WatchdogAsync();
     }
 
-    private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
+    private void OnDetachedFromVisualTree(object sender, VisualTreeAttachmentEventArgs e)
     {
         _conference.StateChanged -= OnConferenceSessionStateChanged;
         _conference.Unregister(
@@ -1262,7 +1262,7 @@ public partial class MainView : UserControl
             Dispatcher.UIThread.Post(Apply);
     }
 
-    private void OnConferenceActionClick(object? sender, RoutedEventArgs e)
+    private void OnConferenceActionClick(object sender, RoutedEventArgs e)
     {
         try
         {
@@ -1278,7 +1278,7 @@ public partial class MainView : UserControl
         }
     }
 
-    private async void OnSettingsClick(object? sender, RoutedEventArgs e)
+    private async void OnSettingsClick(object sender, RoutedEventArgs e)
     {
         try
         {
@@ -1291,11 +1291,11 @@ public partial class MainView : UserControl
         }
     }
 
-    private async void OnSettingsBackRequested(object? sender, EventArgs e)
+    private async void OnSettingsBackRequested(object sender, EventArgs e)
     {
         try
         {
-            await CloseSettingsAsync(save: true);
+            await CloseSettingsAsync();
         }
         catch (Exception ex)
         {
@@ -1335,7 +1335,7 @@ public partial class MainView : UserControl
         }
     }
 
-    private async Task CloseSettingsAsync(bool save)
+    private async Task CloseSettingsAsync()
     {
         if (!_settingsOpen || _settingsAnimating)
             return;
@@ -1472,7 +1472,7 @@ public partial class MainView : UserControl
             parameters.Add(("interfaceConfig.TOOLBAR_ALWAYS_VISIBLE", "true"));
         }
 
-        return WithHashParams(url, parameters.ToArray());
+        return WithHashParams(url, [.. parameters]);
     }
 
     private static Uri WithHashParams(Uri url, params (string Key, string Value)[] parameters)
@@ -1481,9 +1481,10 @@ public partial class MainView : UserControl
         var absolute = url.GetLeftPart(UriPartial.Path);
         var query = url.Query; // includes leading '?' or empty
         var fragment = (url.Fragment ?? string.Empty).TrimStart('#');
+        List<string> list = [];
         var parts = string.IsNullOrEmpty(fragment)
-            ? new List<string>()
-            : new List<string>(fragment.Split('&', StringSplitOptions.RemoveEmptyEntries));
+            ? list
+            : [.. fragment.Split('&', StringSplitOptions.RemoveEmptyEntries)];
 
         foreach (var (key, value) in parameters)
         {
@@ -1508,13 +1509,13 @@ public partial class MainView : UserControl
         return new Uri(string.IsNullOrEmpty(hash) ? absolute + query : absolute + query + "#" + hash, UriKind.Absolute);
     }
 
-    private void OnNavigationStarted(object? sender, WebViewNavigationEventArgs e)
+    private void OnNavigationStarted(object sender, WebViewNavigationEventArgs e)
     {
         _bridgeInstalled = false;
         SetStatus("Загрузка страницы…");
     }
 
-    private async void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
+    private async void OnNavigationCompleted(object sender, WebViewNavigationCompletedEventArgs e)
     {
         _pageReady = e.IsSuccess;
         if (e.IsSuccess)
@@ -1721,13 +1722,13 @@ public partial class MainView : UserControl
     }
 
     /// <returns>Script result string, or null on timeout / missing WebView.</returns>
-    private async Task<string?> InvokeScriptResultAsync(string script, int timeoutMs = 4000)
+    private async Task<string> InvokeScriptResultAsync(string script, int timeoutMs = 4000)
     {
         if (RoomWebView is null)
             return null;
 
         var webView = RoomWebView;
-        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         void StartInvoke()
         {
@@ -1737,15 +1738,15 @@ public partial class MainView : UserControl
                 task.ContinueWith(
                     static (t, state) =>
                     {
-                        var source = (TaskCompletionSource<string?>)state!;
+                        var source = (TaskCompletionSource<string>)state!;
                         if (t.IsFaulted)
                             source.TrySetException(t.Exception!.GetBaseException());
                         else if (t.IsCanceled)
                             source.TrySetCanceled();
                         else
                         {
-                            string? value = null;
-                            if (t is Task<string?> typedNullable)
+                            string value = null;
+                            if (t is Task<string> typedNullable)
                                 value = typedNullable.Result;
                             else if (t is Task<string> typed)
                                 value = typed.Result;
@@ -1790,7 +1791,7 @@ public partial class MainView : UserControl
     private Task PushRoomPasswordAsync()
         => PushBridgeContextAsync();
 
-    private void OnWebMessageReceived(object? sender, WebMessageReceivedEventArgs e)
+    private void OnWebMessageReceived(object sender, WebMessageReceivedEventArgs e)
     {
         if (string.IsNullOrWhiteSpace(e.Body))
             return;

@@ -17,37 +17,29 @@ namespace AlcoRats.Services.Speech;
 /// <summary>
 /// Offline Piper TTS via sherpa-onnx. Voice is selected in settings; model downloads on first use.
 /// </summary>
-public sealed class PiperTtsEngine : ITtsEngine, IDisposable
+public sealed class PiperTtsEngine(
+    IAudioPlayer audioPlayer,
+    AppSettings settings,
+    ILogger<PiperTtsEngine> logger = null,
+    string cacheDirectory = null) : ITtsEngine, IDisposable
 {
     private static readonly HttpClient Http = new()
     {
         Timeout = TimeSpan.FromMinutes(10)
     };
 
-    private readonly string _rootDir;
-    private readonly IAudioPlayer _audioPlayer;
-    private readonly AppSettings _settings;
-    private readonly ILogger<PiperTtsEngine> _logger;
-    private readonly SemaphoreSlim _gate = new(1, 1);
-    private OfflineTts? _tts;
-    private string? _loadedVoiceId;
-    private bool _ready;
-
-    public PiperTtsEngine(
-        IAudioPlayer audioPlayer,
-        AppSettings settings,
-        ILogger<PiperTtsEngine>? logger = null,
-        string? cacheDirectory = null)
-    {
-        _audioPlayer = audioPlayer ?? throw new ArgumentNullException(nameof(audioPlayer));
-        _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-        _logger = logger ?? NullLogger<PiperTtsEngine>.Instance;
-        _rootDir = cacheDirectory
+    private readonly string _rootDir = cacheDirectory
             ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "AlcoRats",
                 "piper");
-    }
+    private readonly IAudioPlayer _audioPlayer = audioPlayer ?? throw new ArgumentNullException(nameof(audioPlayer));
+    private readonly AppSettings _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+    private readonly ILogger<PiperTtsEngine> _logger = logger ?? NullLogger<PiperTtsEngine>.Instance;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private OfflineTts _tts;
+    private string _loadedVoiceId;
+    private bool _ready;
 
     public string EngineName => "Piper/" + PiperVoiceCatalog.Resolve(_settings.TtsVoice).Id;
 

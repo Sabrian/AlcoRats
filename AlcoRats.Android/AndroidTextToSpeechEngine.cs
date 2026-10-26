@@ -104,18 +104,14 @@ public sealed class AndroidTextToSpeechEngine : Java.Lang.Object, ITtsEngine, Te
         base.Dispose(disposing);
     }
 
-    private sealed class UtteranceListener : UtteranceProgressListener
+    private sealed class UtteranceListener(Action<string?> onDone) : UtteranceProgressListener
     {
-        private readonly Action<string?> _onDone;
-
-        public UtteranceListener(Action<string?> onDone) => _onDone = onDone;
-
         public override void OnStart(string? utteranceId) { }
 
-        public override void OnDone(string? utteranceId) => _onDone(utteranceId);
+        public override void OnDone(string? utteranceId) => onDone(utteranceId);
 
 #pragma warning disable CS0672, CS0618
-        public override void OnError(string? utteranceId) => _onDone(utteranceId);
+        public override void OnError(string? utteranceId) => onDone(utteranceId);
 #pragma warning restore CS0672, CS0618
     }
 }

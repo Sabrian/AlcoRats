@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using AlcoRats.Settings;
 using Microsoft.Extensions.Logging;
 
@@ -11,35 +12,22 @@ namespace AlcoRats.Services.Speech;
 /// Leaves are confirmed across consecutive snapshots to avoid false “left”
 /// when the WebView briefly publishes a partial/empty participant list.
 /// </summary>
-public sealed class ParticipantAnnouncer
+public sealed class ParticipantAnnouncer(
+    IConferenceSession conference,
+    SpeechQueueService speech,
+    AppSettings settings,
+    ILogger<ParticipantAnnouncer> logger)
 {
     /// <summary>Misses required before speaking leave (normal shrink).</summary>
     private const int LeaveConfirmHits = 2;
 
     /// <summary>Misses when the remote list goes fully empty while still in-call (Redux glitch).</summary>
     private const int LeaveConfirmHitsOnEmptyList = 3;
-
-    private readonly IConferenceSession _conference;
-    private readonly SpeechQueueService _speech;
-    private readonly AppSettings _settings;
-    private readonly ILogger<ParticipantAnnouncer> _logger;
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private Dictionary<string, string> _known = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _pendingLeave = new(StringComparer.Ordinal);
     private bool _baselineReady;
     private bool _started;
-
-    public ParticipantAnnouncer(
-        IConferenceSession conference,
-        SpeechQueueService speech,
-        AppSettings settings,
-        ILogger<ParticipantAnnouncer> logger)
-    {
-        _conference = conference;
-        _speech = speech;
-        _settings = settings;
-        _logger = logger;
-    }
 
     public void Start()
     {
@@ -47,9 +35,9 @@ public sealed class ParticipantAnnouncer
             return;
 
         _started = true;
-        _conference.StateChanged += OnStateChanged;
-        OnStateChanged(_conference.State);
-        _logger.LogInformation("Participant announcer subscribed to conference state");
+        conference.StateChanged += OnStateChanged;
+        OnStateChanged(conference.State);
+        logger.LogInformation("Participant announcer subscribed to conference state");
     }
 
     public void Stop()
@@ -58,7 +46,7 @@ public sealed class ParticipantAnnouncer
             return;
 
         _started = false;
-        _conference.StateChanged -= OnStateChanged;
+        conference.StateChanged -= OnStateChanged;
         lock (_gate)
         {
             _known.Clear();
@@ -66,7 +54,7 @@ public sealed class ParticipantAnnouncer
             _baselineReady = false;
         }
 
-        _logger.LogInformation("Participant announcer stopped");
+        logger.LogInformation("Participant announcer stopped");
     }
 
     private void OnStateChanged(ConferenceSessionState state)
@@ -76,7 +64,7 @@ public sealed class ParticipantAnnouncer
             if (!state.IsActive)
             {
                 if (_known.Count > 0 || _baselineReady)
-                    _logger.LogDebug("Conference inactive — clearing participant baseline");
+                    logger.LogDebug("Conference inactive — clearing participant baseline");
                 _known.Clear();
                 _pendingLeave.Clear();
                 _baselineReady = false;
@@ -93,7 +81,7 @@ public sealed class ParticipantAnnouncer
                 _known = new Dictionary<string, string>(current, StringComparer.Ordinal);
                 _pendingLeave.Clear();
                 _baselineReady = true;
-                _logger.LogInformation("Participant baseline ready ({Count} remote)", current.Count);
+                logger.LogInformation("Participant baseline ready ({Count} remote)", current.Count);
                 return;
             }
 
@@ -102,7 +90,7 @@ public sealed class ParticipantAnnouncer
             {
                 if (current.ContainsKey(id))
                 {
-                    _logger.LogDebug("Participant leave cancelled (returned): {Id}", id);
+                    logger.LogDebug("Participant leave cancelled (returned): {Id}", id);
                     _pendingLeave.Remove(id);
                 }
             }
@@ -115,7 +103,7 @@ public sealed class ParticipantAnnouncer
                     continue;
                 }
 
-                _logger.LogInformation("Participant joined: {Id} ({Name})", id, name);
+                logger.LogInformation("Participant joined: {Id} ({Name})", id, name);
                 _known[id] = name;
                 AnnounceJoin(name);
             }
@@ -126,7 +114,7 @@ public sealed class ParticipantAnnouncer
 
             if (suspiciousEmpty && vanished.Count > 0)
             {
-                _logger.LogDebug(
+                logger.LogDebug(
                     "Ignoring empty remote list for leave ({Pending} known) — need {Hits} confirms",
                     _known.Count,
                     needHits);
@@ -139,7 +127,7 @@ public sealed class ParticipantAnnouncer
                 if (hits < needHits)
                 {
                     _pendingLeave[id] = hits;
-                    _logger.LogDebug(
+                    logger.LogDebug(
                         "Participant leave pending {Hits}/{Need}: {Id} ({Name})",
                         hits,
                         needHits,
@@ -149,7 +137,7 @@ public sealed class ParticipantAnnouncer
                 }
 
                 var name = _known[id];
-                _logger.LogInformation("Participant left: {Id} ({Name})", id, name);
+                logger.LogInformation("Participant left: {Id} ({Name})", id, name);
                 _known.Remove(id);
                 _pendingLeave.Remove(id);
                 AnnounceLeave(name);
@@ -158,10 +146,10 @@ public sealed class ParticipantAnnouncer
     }
 
     private void AnnounceJoin(string name)
-        => Announce(_settings.UserEnter, name);
+        => Announce(settings.UserEnter, name);
 
     private void AnnounceLeave(string name)
-        => Announce(_settings.UserLeave, name);
+        => Announce(settings.UserLeave, name);
 
     private void Announce(string template, string name)
     {
@@ -169,6 +157,6 @@ public sealed class ParticipantAnnouncer
         var text = string.IsNullOrWhiteSpace(template)
             ? shortName
             : template.Replace("{User}", shortName, StringComparison.Ordinal);
-        _speech.Speak(text);
+        speech.Speak(text);
     }
 }

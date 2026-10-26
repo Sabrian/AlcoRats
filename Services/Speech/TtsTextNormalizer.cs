@@ -85,14 +85,25 @@ public sealed class TtsTextNormalizer
             if (entries is null)
                 return;
 
+            // Extend only — do not override built-in (stale seed files used to pin wrong stress,
+            // e.g. Bozon). Users can still add new nicknames not present in BuiltInLexicon.
+            var added = 0;
             foreach (var (key, value) in entries)
             {
                 if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(value))
                     continue;
-                _lexicon[key.Trim()] = value.Trim();
+                var k = key.Trim();
+                if (_lexicon.ContainsKey(k))
+                    continue;
+                _lexicon[k] = value.Trim();
+                added++;
             }
 
-            _logger.LogInformation("TTS lexicon loaded ({Count} entries) from {Path}", _lexicon.Count, _lexiconPath);
+            _logger.LogInformation(
+                "TTS lexicon extended (+{Added} user entries, {Count} total) from {Path}",
+                added,
+                _lexicon.Count,
+                _lexiconPath);
         }
         catch (Exception ex)
         {
@@ -211,7 +222,10 @@ public sealed class TtsTextNormalizer
         get
         {
             // --- nicknames / product ---
+            // Bozon: Бо-зо́н — stress on 2nd syllable (U+0301 after 2nd «о»).
             yield return new("Bozon", "Бозо\u0301н");
+            yield return new("Бозон", "Бозо\u0301н");
+            yield return new("бозон", "Бозо\u0301н");
             yield return new("Tommy", "То\u0301мми");
             yield return new("Tommie", "То\u0301мми");
             yield return new("Sting", "Стинг");

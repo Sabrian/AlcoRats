@@ -162,7 +162,7 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 32) {
+          if (window.__alcoRatsBridgeVersion === 34) {
             try {
               if (typeof window.__alcoRatsFillCredentials === 'function')
                 window.__alcoRatsFillCredentials();
@@ -173,7 +173,7 @@ public partial class MainView : UserControl
             } catch (eEx) {}
             return 'exists';
           }
-          window.__alcoRatsBridgeVersion = 32;
+          window.__alcoRatsBridgeVersion = 34;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           if (window.__alcoRatsUiFixTimer) {
@@ -330,7 +330,10 @@ public partial class MainView : UserControl
                 need = host.scrollHeight || 0;
               if (!need) return;
 
-              var s = need > avail + 2 ? Math.max(0.45, avail / need) : 1;
+              // Extra shrink so active-speaker / selection border clears the toolbox.
+              var FIT_GUTTER_PX = 18;
+              var fitAvail = Math.max(40, avail - FIT_GUTTER_PX);
+              var s = Math.max(0.45, Math.min(1, fitAvail / need));
               s = Math.round(s * 100) / 100;
               if (window.__alcoRatsTileZoom === s) return;
               window.__alcoRatsTileZoom = s;
@@ -347,6 +350,28 @@ public partial class MainView : UserControl
             } catch (e) {}
           }
 
+          // Once per call: if server/mobile still starts muted, unmute after join.
+          function ensureDefaultMicOn(active) {
+            try {
+              if (!active) {
+                window.__alcoRatsDefaultMicDone = false;
+                return;
+              }
+              if (window.__alcoRatsDefaultMicDone) return;
+              if (typeof APP === 'undefined' || !APP.conference) return;
+              window.__alcoRatsDefaultMicDone = true;
+              var muted = typeof APP.conference.isLocalAudioMuted === 'function'
+                && APP.conference.isLocalAudioMuted();
+              if (!muted) return;
+              if (typeof APP.conference.muteAudio === 'function')
+                APP.conference.muteAudio(false);
+              else if (typeof APP.conference.toggleAudioMuted === 'function')
+                APP.conference.toggleAudioMuted();
+              if (typeof window.__alcoRatsPublishConference === 'function')
+                setTimeout(window.__alcoRatsPublishConference, 120);
+            } catch (e) {}
+          }
+
           function pinToolboxToBottom() {
             try {
               ensureToolboxCss();
@@ -360,6 +385,7 @@ public partial class MainView : UserControl
               } catch (e0) {}
 
               if (!active) {
+                ensureDefaultMicOn(false);
                 clearTileViewScale();
                 if (root) {
                   root.style.setProperty('display', 'none', 'important');
@@ -368,6 +394,8 @@ public partial class MainView : UserControl
                 }
                 return;
               }
+
+              ensureDefaultMicOn(true);
 
               if (root) {
                 root.style.removeProperty('display');
@@ -1427,10 +1455,11 @@ public partial class MainView : UserControl
             ("config.defaultLanguage", "\"ru\""),
             // Skip mobile “open in app / join in browser” interstitial inside our WebView.
             ("config.disableDeepLinking", "true"),
-            ("config.deeplinking.disabled", "true")
+            ("config.deeplinking.disabled", "true"),
+            // Mic on by default when joining (video left to Jitsi/server defaults).
+            ("config.startWithAudioMuted", "false")
         };
 
-        // Display name only — do not force prejoin/GUM/mute flags (those broke WebView join).
         if (!string.IsNullOrWhiteSpace(_settings.User))
         {
             var safeName = _settings.User.Trim().Replace("\"", string.Empty, StringComparison.Ordinal);

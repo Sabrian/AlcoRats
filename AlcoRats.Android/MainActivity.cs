@@ -184,6 +184,15 @@ public class MainActivity : AvaloniaMainActivity
         }
     }
 
+    protected override void OnActivityResult(int requestCode, Result resultCode, Intent? data)
+    {
+        // Jitsi chat Files → Share uses <input type=file>; WebView needs this callback.
+        if (WebViewMediaPermissionBridge.TryHandleFileChooserResult(requestCode, resultCode, data))
+            return;
+
+        base.OnActivityResult(requestCode, resultCode, data);
+    }
+
     public override void OnRequestPermissionsResult(
         int requestCode,
         string[] permissions,

@@ -36,6 +36,11 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     private bool _starting;
     private bool _disposed;
 
+    private CancellationTokenSource _chatCts;
+    private Task _chatMonitorTask;
+    private readonly HashSet<string> _seenChatMessageIds = new(StringComparer.Ordinal);
+    private bool _chatBaselineReady;
+
     public JitsiBotService(Configuration configuration, ILogger<JitsiBotService> logger)
     {
         _configuration = configuration;
@@ -43,6 +48,8 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     }
 
     public bool IsRunning => _starting || _browser is { IsClosed: false };
+
+    public event EventHandler<ChatMessage> ChatMessageReceived;
 
     public Task EnsureStartedAsync(CancellationToken cancellationToken = default)
         => StartAsync(cancellationToken);
@@ -116,6 +123,10 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         {
             _starting = false;
             _gate.Release();
+
+            // Must run here: early `return` inside try skips code after try/finally.
+            if (!_disposed && _browser is { IsClosed: false } && _page != null)
+                EnsureChatMonitor();
         }
     }
 
@@ -191,13 +202,37 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
     private async Task<RoomSnapshot> CollectRoomSnapshotAsync(IPage page)
     {
-        // Evaluate in the page main world so window.APP from Jitsi is visible
-        // (PuppeteerSharp's default utility world cannot see page JS objects).
-        var json = await page.EvaluateExpressionAsync<string>("(" + CollectParticipantsScript + ")()");
+        var json = await EvaluateInMainWorldAsync(page, CollectParticipantsScript);
         if (string.IsNullOrWhiteSpace(json))
             return null;
 
         return JsonSerializer.Deserialize<RoomSnapshot>(json, JsonOptions);
+    }
+
+    /// <summary>
+    /// Runs a <c>function() { ... }</c> in the page main world (sees <c>window.APP</c>)
+    /// via a temporary script tag; result is passed back through a DOM attribute.
+    /// </summary>
+    private static async Task<string> EvaluateInMainWorldAsync(IPage page, string functionSource)
+    {
+        return await page.EvaluateFunctionAsync<string>(
+            """
+            (fnSource) => {
+                const attr = 'data-ar-eval-result';
+                document.documentElement.removeAttribute(attr);
+                const script = document.createElement('script');
+                script.textContent =
+                    '(function(){try{var __arFn=(' + fnSource + ');var __arResult=__arFn();' +
+                    'document.documentElement.setAttribute("' + attr + '",' +
+                    '(typeof __arResult===\'string\')?__arResult:JSON.stringify(__arResult));' +
+                    '}catch(e){document.documentElement.setAttribute("' + attr + '",' +
+                    'JSON.stringify({error:String(e&&e.message||e),messages:[],participants:[],appPresent:false}));}})();';
+                document.documentElement.appendChild(script);
+                script.remove();
+                return document.documentElement.getAttribute(attr) || '';
+            }
+            """,
+            functionSource);
     }
 
     private static TimeSpan ResolveRoomOnline(RoomSnapshot snapshot)
@@ -221,6 +256,8 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         if (_disposed)
             return;
 
+        await StopChatMonitorAsync();
+
         await _gate.WaitAsync();
         try
         {
@@ -231,6 +268,159 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         {
             _gate.Release();
         }
+    }
+
+    private void EnsureChatMonitor()
+    {
+        if (_disposed || _page == null || _browser is not { IsClosed: false })
+            return;
+
+        if (_chatMonitorTask is { IsCompleted: false })
+            return;
+
+        _chatCts = new CancellationTokenSource();
+        var token = _chatCts.Token;
+        _chatMonitorTask = Task.Run(() => MonitorChatAsync(token), token);
+        _logger.LogInformation("Jitsi chat monitor started");
+    }
+
+    private async Task StopChatMonitorAsync()
+    {
+        var cts = _chatCts;
+        var task = _chatMonitorTask;
+        _chatCts = null;
+        _chatMonitorTask = null;
+
+        if (cts == null)
+            return;
+
+        try
+        {
+            cts.Cancel();
+            if (task != null)
+            {
+                try
+                {
+                    await task.WaitAsync(TimeSpan.FromSeconds(3));
+                }
+                catch (Exception ex) when (ex is TimeoutException or OperationCanceledException or AggregateException)
+                {
+                    // ignore shutdown races
+                }
+            }
+        }
+        finally
+        {
+            cts.Dispose();
+            _seenChatMessageIds.Clear();
+            _chatBaselineReady = false;
+        }
+    }
+
+    private async Task MonitorChatAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                IPage page;
+                await _gate.WaitAsync(cancellationToken);
+                try
+                {
+                    page = _page;
+                    if (page == null || _browser is not { IsClosed: false })
+                        break;
+                }
+                finally
+                {
+                    _gate.Release();
+                }
+
+                // Ensure main-world hook (APP.store.subscribe + conference.messageReceived).
+                await EvaluateInMainWorldAsync(page, InstallChatHookScript);
+
+                var json = await EvaluateInMainWorldAsync(page, CollectChatMessagesScript);
+                var snapshot = string.IsNullOrWhiteSpace(json)
+                    ? null
+                    : JsonSerializer.Deserialize<ChatSnapshot>(json, JsonOptions);
+
+                if (snapshot?.Error is { Length: > 0 })
+                    _logger.LogWarning("Chat collect error: {Error}", snapshot.Error);
+
+                var messages = snapshot?.Messages ?? Array.Empty<ChatMessageDto>();
+                if (!_chatBaselineReady)
+                {
+                    foreach (var message in messages)
+                    {
+                        if (!string.IsNullOrWhiteSpace(message?.Id))
+                            _seenChatMessageIds.Add(message.Id);
+                    }
+
+                    _chatBaselineReady = true;
+                    _logger.LogInformation(
+                        "Chat baseline captured ({Count} messages, appPresent={AppPresent}, hooked={Hooked})",
+                        _seenChatMessageIds.Count,
+                        snapshot?.AppPresent,
+                        snapshot?.Hooked);
+                }
+                else
+                {
+                    foreach (var message in messages)
+                    {
+                        if (message == null || string.IsNullOrWhiteSpace(message.Id))
+                            continue;
+                        if (!_seenChatMessageIds.Add(message.Id))
+                            continue;
+                        if (string.IsNullOrWhiteSpace(message.Text))
+                            continue;
+
+                        var chatMessage = new ChatMessage
+                        {
+                            Id = message.Id,
+                            Text = message.Text.Trim(),
+                            Sender = string.IsNullOrWhiteSpace(message.Sender) ? "Unknown" : message.Sender.Trim(),
+                            Timestamp = message.TimestampMs is > 0
+                                ? DateTimeOffset.FromUnixTimeMilliseconds(message.TimestampMs.Value)
+                                : DateTimeOffset.UtcNow,
+                            IsLocal = message.Local,
+                        };
+
+                        _logger.LogInformation(
+                            "Jitsi chat message from {Sender}: {Text}",
+                            chatMessage.Sender,
+                            chatMessage.Text);
+
+                        try
+                        {
+                            ChatMessageReceived?.Invoke(this, chatMessage);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "ChatMessageReceived handler failed");
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Chat monitor tick failed");
+            }
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+
+        _logger.LogInformation("Jitsi chat monitor stopped");
     }
 
     public async ValueTask DisposeAsync()
@@ -951,6 +1141,173 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         return host.Trim().TrimEnd('/');
     }
 
+    private const string InstallChatHookScript =
+        """
+        function() {
+            try {
+                var app = window.APP;
+                if (!window.__arChat) {
+                    window.__arChat = { hooked: false, queue: [], seen: {} };
+                }
+                var hook = window.__arChat;
+                if (hook.hooked)
+                    return JSON.stringify({ ok: true, hooked: true });
+                if (!app || !app.store || typeof app.store.getState !== 'function')
+                    return JSON.stringify({ ok: false, hooked: false, reason: 'no-app' });
+
+                function mapMessage(m) {
+                    if (!m || m.isReaction) return null;
+                    var text = String(m.message != null ? m.message : (m.content != null ? m.content : '')).trim();
+                    if (!text) return null;
+                    var id = m.messageId != null ? String(m.messageId)
+                        : (m.id != null ? String(m.id)
+                        : String((m.timestamp || 0) + ':' + text + ':' + (m.displayName || m.participantName || '')));
+                    var ts = 0;
+                    if (typeof m.timestamp === 'number' && m.timestamp > 0)
+                        ts = m.timestamp < 1e12 ? m.timestamp * 1000 : m.timestamp;
+                    var myId = '';
+                    try {
+                        if (app.conference && typeof app.conference.getMyUserId === 'function')
+                            myId = String(app.conference.getMyUserId() || '');
+                    } catch (eMy) {}
+                    var pid = m.participantId != null ? String(m.participantId) : '';
+                    return {
+                        id: id,
+                        text: text,
+                        sender: String(m.displayName || m.participantName || m.sender || m.nick || ''),
+                        timestampMs: ts,
+                        local: !!(m.local || m.isLocal || (myId && pid && myId === pid))
+                    };
+                }
+
+                function enqueueFromStore() {
+                    try {
+                        var chat = app.store.getState()['features/chat'] || {};
+                        var messages = chat.messages || [];
+                        for (var i = 0; i < messages.length; i++) {
+                            var mapped = mapMessage(messages[i]);
+                            if (!mapped || hook.seen[mapped.id]) continue;
+                            hook.seen[mapped.id] = true;
+                            hook.queue.push(mapped);
+                        }
+                    } catch (eStore) {}
+                }
+
+                // Baseline: mark current messages as seen, don't enqueue.
+                try {
+                    var chat0 = app.store.getState()['features/chat'] || {};
+                    var existing = chat0.messages || [];
+                    for (var j = 0; j < existing.length; j++) {
+                        var mapped0 = mapMessage(existing[j]);
+                        if (mapped0) hook.seen[mapped0.id] = true;
+                    }
+                } catch (eBase) {}
+
+                if (typeof app.store.subscribe === 'function') {
+                    app.store.subscribe(function () { enqueueFromStore(); });
+                }
+
+                // lib-jitsi-meet chat events (names vary by version).
+                try {
+                    var conf = app.conference;
+                    if (conf && typeof conf.on === 'function') {
+                        var onMsg = function (id, text, ts) {
+                            try {
+                                var name = '';
+                                try {
+                                    var p = conf.getParticipantById && conf.getParticipantById(id);
+                                    name = (p && (p.getDisplayName && p.getDisplayName() || p._displayName)) || '';
+                                } catch (eName) {}
+                                var mid = String(ts || Date.now()) + ':' + String(id || '') + ':' + String(text || '');
+                                if (hook.seen[mid]) return;
+                                hook.seen[mid] = true;
+                                var myId2 = '';
+                                try { myId2 = String(conf.getMyUserId && conf.getMyUserId() || ''); } catch (e2) {}
+                                hook.queue.push({
+                                    id: mid,
+                                    text: String(text || ''),
+                                    sender: String(name || id || ''),
+                                    timestampMs: typeof ts === 'number' ? (ts < 1e12 ? ts * 1000 : ts) : Date.now(),
+                                    local: !!(myId2 && id && String(id) === myId2)
+                                });
+                            } catch (eMsg) {}
+                        };
+                        conf.on('conference.messageReceived', onMsg);
+                        conf.on('conference.user_message_received', onMsg);
+                        conf.on('messageReceived', onMsg);
+                    }
+                } catch (eConf) {}
+
+                hook.hooked = true;
+                return JSON.stringify({ ok: true, hooked: true });
+            } catch (e) {
+                return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+            }
+        }
+        """;
+
+    private const string CollectChatMessagesScript =
+        """
+        function() {
+            try {
+                var app = window.APP;
+                var appPresent = !!app;
+                var hooked = !!(window.__arChat && window.__arChat.hooked);
+                var result = [];
+
+                // Drain event queue first (from store.subscribe / conference.on).
+                if (window.__arChat && window.__arChat.queue && window.__arChat.queue.length) {
+                    result = window.__arChat.queue.splice(0, window.__arChat.queue.length);
+                }
+
+                // Also snapshot current store messages (dedupe happens in C#).
+                if (app && app.store && typeof app.store.getState === 'function') {
+                    var chat = app.store.getState()['features/chat'] || {};
+                    var messages = chat.messages || [];
+                    var myId = '';
+                    try {
+                        if (app.conference && typeof app.conference.getMyUserId === 'function')
+                            myId = String(app.conference.getMyUserId() || '');
+                    } catch (eMy) {}
+
+                    for (var i = 0; i < messages.length; i++) {
+                        var m = messages[i];
+                        if (!m || m.isReaction) continue;
+                        var text = String(m.message != null ? m.message : (m.content != null ? m.content : '')).trim();
+                        if (!text) continue;
+                        var id = m.messageId != null ? String(m.messageId)
+                            : (m.id != null ? String(m.id)
+                            : String((m.timestamp || 0) + ':' + text + ':' + (m.displayName || m.participantName || '')));
+                        var ts = 0;
+                        if (typeof m.timestamp === 'number' && m.timestamp > 0)
+                            ts = m.timestamp < 1e12 ? m.timestamp * 1000 : m.timestamp;
+                        var pid = m.participantId != null ? String(m.participantId) : '';
+                        result.push({
+                            id: id,
+                            text: text,
+                            sender: String(m.displayName || m.participantName || m.sender || m.nick || ''),
+                            timestampMs: ts,
+                            local: !!(m.local || m.isLocal || (myId && pid && myId === pid))
+                        });
+                    }
+                }
+
+                return JSON.stringify({
+                    messages: result,
+                    appPresent: appPresent,
+                    hooked: hooked
+                });
+            } catch (e) {
+                return JSON.stringify({
+                    messages: [],
+                    appPresent: false,
+                    hooked: false,
+                    error: String(e && e.message || e)
+                });
+            }
+        }
+        """;
+
     // NOTE: evaluated via EvaluateExpressionAsync in the page main world (needs window.APP).
     private const string CollectParticipantsScript =
         """
@@ -1201,5 +1558,29 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     private sealed class ParticipantSnapshot
     {
         public string Name { get; set; }
+    }
+
+    private sealed class ChatSnapshot
+    {
+        public ChatMessageDto[] Messages { get; set; }
+
+        public bool? AppPresent { get; set; }
+
+        public bool? Hooked { get; set; }
+
+        public string Error { get; set; }
+    }
+
+    private sealed class ChatMessageDto
+    {
+        public string Id { get; set; }
+
+        public string Text { get; set; }
+
+        public string Sender { get; set; }
+
+        public long? TimestampMs { get; set; }
+
+        public bool Local { get; set; }
     }
 }

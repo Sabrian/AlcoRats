@@ -5,9 +5,9 @@ namespace AlcoRats.Bot;
 
 public class Configuration
 {
-    public string Token { get; set; } = "6670124184:AAF9ORrkDLCoo5uK4Km-GpHeAzvtNMWt8rU";
+    public string Token { get; set; } = "8886065444:AAG3j0TdDYv7Yn8yy5k-B9hk-gxKPVFatdk";
 
-    public string TelegramBotName { get; set; } = "@vkvorovaykabot";
+    public string TelegramBotName { get; set; } = "@alcoratsbot";
 
     public string JitsiHost = "https://alkonost-our.site/";
 

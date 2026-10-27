@@ -1,13 +1,13 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using LiteDB;
 
-namespace AlcoRats.Bot.Models
+namespace AlcoRats.Bot.Models;
+
+class Subscriber
 {
-    class Subscriber
-    {
-        public string Name { get; set; }
+    public string Name { get; set; }
 
-        public long Id { get; set; }
-    }
+    [BsonId]
+    public long Id { get; set; }
+
+    public bool All { get; set; }
 }

@@ -20,6 +20,41 @@ class CommandProcessor : ICommandProcessor
         _configuration = configuration;
         _database = database;
         _clientProvider = clientProvider;
+
+        _jitsiBot.ChatMessageReceived += OnJitsiChatMessageReceived;
+    }
+
+    private async void OnJitsiChatMessageReceived(object sender, ChatMessage message)
+    {
+        if (message == null || message.IsLocal || string.IsNullOrWhiteSpace(message.Text))
+            return;
+
+        try
+        {
+            var list = message.Text.ToLower();
+            var anonce = list.StartsWith("/tg") || list.StartsWith("\\tg");
+            if (anonce)
+            {
+                message.Text = message.Text["/tg".Length..].Trim();
+            }
+
+            var subscribers = _database.GetSubscribers();
+            foreach (var subscriber in subscribers)
+            {
+                if (subscriber.All || anonce)
+                {
+                    var client = _clientProvider.GetClient(subscriber.Id);
+                    if (client == null)
+                        continue;
+
+                    await client.Response($"[{message.Sender}]\n{message.Text}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to forward Jitsi chat message to Telegram subscribers");
+        }
     }
 
     public async Task Process(ICommand command)
@@ -61,8 +96,16 @@ class CommandProcessor : ICommandProcessor
                 }
                 else
                 {
-                    _database.AddSubscriber(new Subscriber { Id = command.ChatId, Name = command.Owner });
-                    await command.Response($"{command.Owner} упешно подписан(а)");
+                    var all = (command.Arguments.FirstOrDefault() == "all" && !command.IsGroup);
+                    _database.AddSubscriber(new Subscriber { Id = command.ChatId, Name = command.Owner, All = all });
+                    if (all)
+                    {
+                        await command.Response($"{command.Owner} упешно подписан(а) на все");
+                    }
+                    else
+                    {
+                        await command.Response($"{command.Owner} упешно подписан(а)");
+                    }
                 }
                 break;
             }
@@ -80,13 +123,6 @@ class CommandProcessor : ICommandProcessor
                 }
                 break;
             }
-
-            case CommandKind.Message:
-                foreach(var subscriber in _database.GetSubscribers().ToEnumerable())
-                {
-                    await _clientProvider.GetClient(subscriber.Id)?.Response($"Отправитель: {command.Arguments.FirstOrDefault()}\r\nАбракадабра!");
-                }
-                break;
         }
     }
 }

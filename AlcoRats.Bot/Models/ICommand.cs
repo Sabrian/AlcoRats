@@ -36,7 +36,6 @@ namespace AlcoRats.Bot.Models
         Go = Golive,
         App,
         Subscribe,
-        Unsubscribe,
-        Message
+        Unsubscribe
     }
 }

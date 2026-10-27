@@ -68,8 +68,14 @@ class TelegramCommandProvider : ICommandProvider, IClientProvider
 
                     var words = message.Split(splitters, StringSplitOptions.RemoveEmptyEntries);
                     if (words.FirstOrDefault() is not { } cmd)
-                        return;
+                    {
+                        cmd = "list";
+                    }
 
+                    if(cmd.StartsWith("/") || cmd.StartsWith("\\"))
+                    {
+                        cmd = cmd.Substring(1);
+                    }
 
                     var at = cmd.IndexOf('@');
                     if (at >= 0)

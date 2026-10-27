@@ -5,6 +5,7 @@ using Serilog;
 using System.Text;
 using Telegram.Bot;
 using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
 
 namespace AlcoRats.Bot.Services;
 
@@ -54,6 +55,31 @@ class TelegramCommandProvider : ICommandProvider, IClientProvider
 
                     var splitters = " \r\n\t/".ToCharArray();
                     var message = update.Message.Text?.Trim(splitters) ?? string.Empty;
+                    if (update.Message.ReplyToMessage is { } reply && reply.From is { } original && original.IsBot && ("@" + original.Username.ToLower() == _configuration.TelegramBotName))
+                    {
+                        _commands.Enqueue(
+                            new Command(botClient)
+                            {
+                                Owner = update.Message.Chat?.Title ?? from.Username ?? $"{from.FirstName} {from.LastName}".Trim(),
+                                Id = update.Message.Id,
+                                Kind = CommandKind.Message,
+                                Arguments = [ message ],
+                                User = new ProviderUser
+                                {
+                                    Id = from.Id,
+                                    FirstName = from.FirstName,
+                                    LastName = from.LastName,
+                                    UserName = from.Username,
+                                },
+                                ChatId = chatId,
+                            });
+
+                        return;
+                    }
+
+
+
+
                     if (chatId != from.Id)
                     {
                         if (message.ToLower().StartsWith($"{_configuration.TelegramBotName}"))
@@ -137,7 +163,7 @@ class TelegramCommandProvider : ICommandProvider, IClientProvider
             _client = client;
         }
 
-        public async Task Response(string message)
+        public async Task Response(string message, MessageMarkup markup = MessageMarkup.None)
         {
             try
             {
@@ -145,13 +171,15 @@ class TelegramCommandProvider : ICommandProvider, IClientProvider
                 if (User != null && ChatId != User.Id && Id != 0)
                     replyParameters = Id;
 
+                var parseMode = ToParseMode(markup);
+
                 var lines = message.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
                 var buffer = new StringBuilder();
                 foreach (var line in lines)
                 {
                     if (line.Length + buffer.Length > 4000)
                     {
-                        await _client.SendMessage(new ChatId(ChatId), buffer.ToString(), replyParameters: replyParameters);
+                        await _client.SendMessage(new ChatId(ChatId), buffer.ToString(), parseMode: parseMode, replyParameters: replyParameters);
                         buffer.Clear();
                     }
                     else
@@ -159,13 +187,21 @@ class TelegramCommandProvider : ICommandProvider, IClientProvider
                 }
 
                 if (buffer.Length > 0)
-                    await _client.SendMessage(new ChatId(ChatId), buffer.ToString(), replyParameters: replyParameters);
+                    await _client.SendMessage(new ChatId(ChatId), buffer.ToString(), parseMode: parseMode, replyParameters: replyParameters);
             }
             catch (Exception e)
             {
                 Log.Error(e, e.Message);
             }
         }
+
+        private static ParseMode ToParseMode(MessageMarkup markup) => markup switch
+        {
+            MessageMarkup.Markdown => ParseMode.Markdown,
+            MessageMarkup.MarkdownV2 => ParseMode.MarkdownV2,
+            MessageMarkup.Html => ParseMode.Html,
+            _ => ParseMode.None,
+        };
     }
 
     class Command : Client, ICommand

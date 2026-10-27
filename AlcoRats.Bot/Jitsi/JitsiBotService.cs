@@ -41,6 +41,10 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     private readonly HashSet<string> _seenChatMessageIds = new(StringComparer.Ordinal);
     private bool _chatBaselineReady;
 
+    // id -> display name (real users only; screen-share stubs never enter this map)
+    private readonly Dictionary<string, string> _knownParticipants = new(StringComparer.Ordinal);
+    private bool _participantsBaselineReady;
+
     public JitsiBotService(Configuration configuration, ILogger<JitsiBotService> logger)
     {
         _configuration = configuration;
@@ -50,6 +54,10 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     public bool IsRunning => _starting || _browser is { IsClosed: false };
 
     public event EventHandler<ChatMessage> ChatMessageReceived;
+
+    public event EventHandler<RoomParticipant> UserConnected;
+
+    public event EventHandler<RoomParticipant> UserDisconnected;
 
     public Task EnsureStartedAsync(CancellationToken cancellationToken = default)
         => StartAsync(cancellationToken);
@@ -251,6 +259,94 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         return TimeSpan.Zero;
     }
 
+    public async Task SendMessage(string message)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (string.IsNullOrWhiteSpace(message))
+            throw new ArgumentException("Message must not be empty.", nameof(message));
+
+        await EnsureStartedAsync();
+
+        await _gate.WaitAsync();
+        try
+        {
+            if (_page == null || _browser is not { IsClosed: false })
+                throw new InvalidOperationException("Jitsi browser is not available.");
+
+            if (!await IsJoinedAsync(_page))
+                throw new InvalidOperationException("Jitsi bot is not in the conference.");
+
+            var textJson = JsonSerializer.Serialize(message);
+            var script =
+                $$"""
+                function() {
+                    var text = {{textJson}};
+                    if (!text || !String(text).trim())
+                        return JSON.stringify({ ok: false, error: 'empty' });
+
+                    try {
+                        var app = window.APP;
+                        if (!app)
+                            return JSON.stringify({ ok: false, error: 'no-app' });
+
+                        // Prefer lib-jitsi-meet conference from Redux.
+                        var conf = null;
+                        try {
+                            if (app.store && typeof app.store.getState === 'function') {
+                                var state = app.store.getState();
+                                var base = state['features/base/conference'] || {};
+                                conf = base.conference || null;
+                            }
+                        } catch (eState) {}
+
+                        if (!conf && app.conference) {
+                            if (typeof app.conference.sendTextMessage === 'function')
+                                conf = app.conference;
+                            else if (app.conference._room)
+                                conf = app.conference._room;
+                        }
+
+                        if (!conf)
+                            return JSON.stringify({ ok: false, error: 'no-conference' });
+
+                        if (typeof conf.sendTextMessage === 'function') {
+                            conf.sendTextMessage(String(text));
+                            return JSON.stringify({ ok: true, via: 'sendTextMessage' });
+                        }
+
+                        if (typeof conf.sendMessage === 'function') {
+                            conf.sendMessage(String(text));
+                            return JSON.stringify({ ok: true, via: 'sendMessage' });
+                        }
+
+                        return JSON.stringify({ ok: false, error: 'no-send-api' });
+                    } catch (e) {
+                        return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+                    }
+                }
+                """;
+
+            var json = await EvaluateInMainWorldAsync(_page, script);
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+            var root = doc.RootElement;
+            var ok = root.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
+            if (!ok)
+            {
+                var error = root.TryGetProperty("error", out var errProp)
+                    ? errProp.GetString()
+                    : "unknown";
+                throw new InvalidOperationException($"Failed to send Jitsi chat message: {error}");
+            }
+
+            _logger.LogInformation("Sent Jitsi chat message ({Length} chars)", message.Length);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task StopAsync()
     {
         if (_disposed)
@@ -314,12 +410,14 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             cts.Dispose();
             _seenChatMessageIds.Clear();
             _chatBaselineReady = false;
+            _knownParticipants.Clear();
+            _participantsBaselineReady = false;
         }
     }
 
     private async Task MonitorChatAsync(CancellationToken cancellationToken)
     {
-        // History often loads a few seconds after join; absorb without raising events.
+        // History / roster often settle a few seconds after join; absorb without raising events.
         var absorbUntil = DateTime.UtcNow.AddSeconds(8);
         var joinCutoff = (_joinedAt ?? DateTime.UtcNow).AddSeconds(-5);
 
@@ -416,6 +514,8 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                         }
                     }
                 }
+
+                await ProcessParticipantPresenceAsync(page, absorbing);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -437,6 +537,100 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         }
 
         _logger.LogInformation("Jitsi chat monitor stopped");
+    }
+
+    private async Task ProcessParticipantPresenceAsync(IPage page, bool absorbing)
+    {
+        var room = await CollectRoomSnapshotAsync(page);
+        var current = new Dictionary<string, ParticipantSnapshot>(StringComparer.Ordinal);
+
+        foreach (var p in room?.Participants ?? Array.Empty<ParticipantSnapshot>())
+        {
+            if (p == null || string.IsNullOrWhiteSpace(p.Id))
+                continue;
+            if (p.Local)
+                continue;
+            if (IsBotParticipantName(p.Name))
+                continue;
+
+            var name = string.IsNullOrWhiteSpace(p.Name) ? "Участник" : p.Name.Trim();
+            current[p.Id] = new ParticipantSnapshot { Id = p.Id, Name = name, Local = false };
+        }
+
+        if (!_participantsBaselineReady || absorbing)
+        {
+            foreach (var (id, p) in current)
+                _knownParticipants[id] = p.Name;
+
+            // Drop anyone who disappeared during absorb without announcing.
+            foreach (var id in _knownParticipants.Keys.Except(current.Keys).ToArray())
+                _knownParticipants.Remove(id);
+
+            if (!_participantsBaselineReady)
+            {
+                _participantsBaselineReady = true;
+                _logger.LogInformation(
+                    "Participant baseline captured ({Count} users); absorbing roster until settle",
+                    _knownParticipants.Count);
+            }
+
+            return;
+        }
+
+        foreach (var (id, p) in current)
+        {
+            if (_knownParticipants.TryGetValue(id, out var existingName))
+            {
+                if (!string.Equals(existingName, p.Name, StringComparison.Ordinal))
+                    _knownParticipants[id] = p.Name;
+                continue;
+            }
+
+            _knownParticipants[id] = p.Name;
+            var joined = new RoomParticipant { Id = id, Name = p.Name };
+            _logger.LogInformation("User connected: {Name} ({Id})", joined.Name, joined.Id);
+            try
+            {
+                UserConnected?.Invoke(this, joined);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "UserConnected handler failed");
+            }
+        }
+
+        foreach (var id in _knownParticipants.Keys.Except(current.Keys).ToArray())
+        {
+            var name = _knownParticipants[id];
+            _knownParticipants.Remove(id);
+            var left = new RoomParticipant { Id = id, Name = name };
+            _logger.LogInformation("User disconnected: {Name} ({Id})", left.Name, left.Id);
+            try
+            {
+                UserDisconnected?.Invoke(this, left);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "UserDisconnected handler failed");
+            }
+        }
+    }
+
+    private bool IsBotParticipantName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return false;
+
+        var n = name.Trim();
+        if (!string.IsNullOrWhiteSpace(_configuration.BotName)
+            && string.Equals(n, _configuration.BotName.Trim(), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(_configuration.JitsiUserLogin)
+            && string.Equals(n, _configuration.JitsiUserLogin.Trim(), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
     }
 
     public async ValueTask DisposeAsync()
@@ -509,6 +703,8 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-logging",
+            "--log-level=3",
             $"--remote-debugging-port={port}",
             $"--user-data-dir={userDataDir}",
         };
@@ -518,7 +714,8 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             Headless = _configuration.JitsiHeadless,
             Args = args.ToArray(),
             DefaultViewport = null,
-            DumpIO = true,
+            // false: do not forward Chromium stderr (DBus/ALSA/DevTools spam) to our console
+            DumpIO = false,
         };
 
         if (!string.IsNullOrWhiteSpace(executablePath))
@@ -1403,7 +1600,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 if (!id) return;
                 if (isNonPersonParticipant(p, id)) return;
                 byId[id] = {
-                    name: p.name || p.displayName || (isLocal || p.local ? 'Вы' : 'Участник')
+                    id: id,
+                    name: p.name || p.displayName || (isLocal || p.local ? 'Вы' : 'Участник'),
+                    local: !!(isLocal || p.local)
                 };
             }
 
@@ -1493,8 +1692,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                         var name = String(names[i].textContent || '').trim();
                         if (!name) continue;
                         var id = names[i].id || ('dom-' + i + '-' + name);
+                        if (isNonPersonParticipant({ name: name }, id)) continue;
                         if (!byId[id])
-                            byId[id] = { name: name };
+                            byId[id] = { id: id, name: name, local: id === 'localDisplayName' };
                     }
                 } catch (eDom) {}
             }
@@ -1557,7 +1757,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                                         || (typeof m.isHidden === 'function' && m.isHidden() ? 'hidden' : null)
                                 };
                                 if (isNonPersonParticipant(member, id)) return;
-                                byId[id] = { name: member.name };
+                                byId[id] = { id: id, name: member.name, local: !!(myId && id === myId) };
                             });
                         } catch (e) {}
                     }
@@ -1568,7 +1768,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                             if (!myId && typeof room.myUserId === 'function')
                                 myId = String(room.myUserId() || '');
                             if (myId && !byId[myId])
-                                byId[myId] = { name: 'Вы' };
+                                byId[myId] = { id: myId, name: 'Вы', local: true };
                             var parts = room.participants || {};
                             Object.keys(parts).forEach(function (id) {
                                 if (!id || byId[String(id)]) return;
@@ -1579,7 +1779,11 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                                     name: (p._displayName || p.getDisplayName && p.getDisplayName() || 'Участник')
                                 };
                                 if (isNonPersonParticipant(entry, id)) return;
-                                byId[String(id)] = { name: entry.name };
+                                byId[String(id)] = {
+                                    id: String(id),
+                                    name: entry.name,
+                                    local: !!(myId && String(id) === myId)
+                                };
                             });
                         } catch (e) {}
                     }
@@ -1619,7 +1823,11 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
     private sealed class ParticipantSnapshot
     {
+        public string Id { get; set; }
+
         public string Name { get; set; }
+
+        public bool Local { get; set; }
     }
 
     private sealed class ChatSnapshot

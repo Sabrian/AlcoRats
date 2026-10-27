@@ -28,6 +28,19 @@ namespace AlcoRats.Bot.Models
 
             }
         }
+
+        public string UserName
+        {
+            get
+            {
+                if(User.FirstName is { } first || User.LastName is { } last)
+                {
+                    return $"{User.FirstName} {User.LastName}".Trim();
+                }
+
+                return string.IsNullOrEmpty(User.UserName) ? Owner : User.UserName;
+            }
+        }
     }
 
     enum CommandKind
@@ -36,6 +49,8 @@ namespace AlcoRats.Bot.Models
         Go = Golive,
         App,
         Subscribe,
-        Unsubscribe
+        Unsubscribe,
+        Message,
+        Help
     }
 }

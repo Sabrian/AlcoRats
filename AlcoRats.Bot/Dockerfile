@@ -32,7 +32,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     JitsiRemoteDebuggingPort=9333 \
     JitsiHeadless=true \
     LiteDbPath=/data/data.db \
-    LogDirectory=/data/logs
+    LogDirectory=/data/logs \
+    DBUS_SESSION_BUS_ADDRESS=/dev/null \
+    DBUS_SYSTEM_BUS_ADDRESS=/dev/null
 
 USER root
 

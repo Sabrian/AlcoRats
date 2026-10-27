@@ -6,6 +6,8 @@ namespace AlcoRats.Bot.Services;
 
 class CommandProcessor : ICommandProcessor
 {
+    private const string HELP = "Использование:\r\n@AlcoratsBot: посмотреть список участников конференции\r\n@AlcoratsBot `golive` или `go`: получить ссылку на конференцию\r\n@AlcoratsBot `app`: получить ссылку на приложение\r\n@AloratsBot `subscribe`, `subscribe all` или `unsubscribe`: управление подпиской\r\nОтветьте на любое сообщение @AlcoratsBot для того чтобы написать в конференцию";
+
     private readonly IJitsiBotService _jitsiBot;
     private readonly Configuration _configuration;
     private readonly IDatabase _database;
@@ -22,6 +24,8 @@ class CommandProcessor : ICommandProcessor
         _clientProvider = clientProvider;
 
         _jitsiBot.ChatMessageReceived += OnJitsiChatMessageReceived;
+        _jitsiBot.UserConnected += OnJitsiUserConnected;
+        _jitsiBot.UserDisconnected += OnJitsiUserDisconnected;
     }
 
     private async void OnJitsiChatMessageReceived(object sender, ChatMessage message)
@@ -32,10 +36,10 @@ class CommandProcessor : ICommandProcessor
         try
         {
             var list = message.Text.ToLower();
-            var anonce = list.StartsWith("/tg") || list.StartsWith("\\tg");
+            var anonce = message.Text.StartsWith("@@");
             if (anonce)
             {
-                message.Text = message.Text["/tg".Length..].Trim();
+                message.Text = message.Text[2..].Trim();
             }
 
             var subscribers = _database.GetSubscribers();
@@ -54,6 +58,44 @@ class CommandProcessor : ICommandProcessor
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to forward Jitsi chat message to Telegram subscribers");
+        }
+    }
+
+    private async void OnJitsiUserConnected(object sender, RoomParticipant participant)
+    {
+        if (participant == null || string.IsNullOrWhiteSpace(participant.Name))
+            return;
+
+        await NotifyAllSubscribersAsync($"{participant.Name} подключился к конференции");
+    }
+
+    private async void OnJitsiUserDisconnected(object sender, RoomParticipant participant)
+    {
+        if (participant == null || string.IsNullOrWhiteSpace(participant.Name))
+            return;
+
+        await NotifyAllSubscribersAsync($"{participant.Name} отключился от конференции");
+    }
+
+    private async Task NotifyAllSubscribersAsync(string text)
+    {
+        try
+        {
+            foreach (var subscriber in _database.GetSubscribers())
+            {
+                if (!subscriber.All)
+                    continue;
+
+                var client = _clientProvider.GetClient(subscriber.Id);
+                if (client == null)
+                    continue;
+
+                await client.Response(text);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to notify All subscribers: {Text}", text);
         }
     }
 
@@ -123,6 +165,14 @@ class CommandProcessor : ICommandProcessor
                 }
                 break;
             }
+
+            case CommandKind.Help:
+                await command.Response(HELP, MessageMarkup.Markdown);
+                break;
+
+            case CommandKind.Message:
+                await _jitsiBot.SendMessage($"[{command.UserName}]: {(command.Arguments.FirstOrDefault() ?? string.Empty)}");
+                break;
         }
     }
 }

@@ -45,6 +45,8 @@ ARGS=(
   -e JitsiHeadless=true
   -e LiteDbPath=/data/data.db
   -e LogDirectory=/data/logs
+  -e DBUS_SESSION_BUS_ADDRESS=/dev/null
+  -e DBUS_SYSTEM_BUS_ADDRESS=/dev/null
   -p 9333:9333
   -v "${DATA_DIR}:/data"
 )

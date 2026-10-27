@@ -487,8 +487,12 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         {
             "--use-fake-ui-for-media-stream",
             "--use-fake-device-for-media-stream",
+            "--mute-audio",
+            "--autoplay-policy=no-user-gesture-required",
             "--no-sandbox",
             "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
             $"--remote-debugging-port={port}",
             $"--user-data-dir={userDataDir}",
         };
@@ -498,15 +502,28 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             Headless = _configuration.JitsiHeadless,
             Args = args.ToArray(),
             DefaultViewport = null,
+            DumpIO = true,
         };
 
         if (!string.IsNullOrWhiteSpace(executablePath))
         {
             launchOptions.ExecutablePath = executablePath;
-            _logger.LogDebug("Using Chromium at {ExecutablePath}", executablePath);
+            _logger.LogInformation("Using Chromium at {ExecutablePath}", executablePath);
         }
 
-        _browser = await Puppeteer.LaunchAsync(launchOptions);
+        try
+        {
+            _browser = await Puppeteer.LaunchAsync(launchOptions);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Chromium launch failed (executable={ExecutablePath}). Inner: {Inner}",
+                executablePath,
+                ex.InnerException?.Message ?? "(none)");
+            throw;
+        }
         _ownsBrowser = true;
         _logger.LogInformation(
             "Launched Chromium (debugging port {Port}, profile {UserDataDir})",
@@ -1114,15 +1131,12 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
     private async Task<string> ResolveChromiumPathAsync(CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(_configuration.ChromiumExecutablePath)
-            && File.Exists(_configuration.ChromiumExecutablePath))
-        {
+        if (IsUsableChromiumExecutable(_configuration.ChromiumExecutablePath))
             return _configuration.ChromiumExecutablePath;
-        }
 
         foreach (var path in DefaultChromiumPaths)
         {
-            if (File.Exists(path))
+            if (IsUsableChromiumExecutable(path))
                 return path;
         }
 
@@ -1131,6 +1145,35 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         var installed = await fetcher.DownloadAsync();
         cancellationToken.ThrowIfCancellationRequested();
         return installed.GetExecutablePath();
+    }
+
+    /// <summary>
+    /// Rejects missing paths and Ubuntu snap transitional stubs (chromium-browser → /snap/bin/chromium).
+    /// </summary>
+    private static bool IsUsableChromiumExecutable(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return false;
+
+        try
+        {
+            using var stream = File.OpenRead(path);
+            Span<byte> header = stackalloc byte[256];
+            var read = stream.Read(header);
+            if (read >= 2 && header[0] == (byte)'#' && header[1] == (byte)'!')
+            {
+                var text = System.Text.Encoding.UTF8.GetString(header[..read]);
+                if (text.Contains("/snap/", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("snap install", StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static string NormalizeHost(string host)

@@ -11,7 +11,15 @@ class Database : IDatabase
 
     public Database()
     {
-        _db = new LiteDatabase("data.db");
+        var path = Environment.GetEnvironmentVariable("LiteDbPath");
+        if (string.IsNullOrWhiteSpace(path))
+            path = "data.db";
+
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(dir))
+            Directory.CreateDirectory(dir);
+
+        _db = new LiteDatabase(path);
         _subscribers = _db.GetCollection<Subscriber>();
         _subscribers.EnsureIndex(x => x.Id, unique: true);
     }

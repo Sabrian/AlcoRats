@@ -49,13 +49,43 @@ public class Configuration
                 Instance = JsonSerializer.Deserialize<Configuration>(File.ReadAllText("configuration.json")) ?? new Configuration();
             }
             else
-            { 
-                Instance = new Configuration(); 
+            {
+                Instance = new Configuration();
             }
         }
         catch
         {
             Instance = new Configuration();
         }
+
+        ApplyEnvironmentOverrides(Instance);
+    }
+
+    private static void ApplyEnvironmentOverrides(Configuration config)
+    {
+        static string Env(string name) => Environment.GetEnvironmentVariable(name);
+
+        if (!string.IsNullOrWhiteSpace(Env("ChromiumExecutablePath")))
+            config.ChromiumExecutablePath = Env("ChromiumExecutablePath");
+        if (!string.IsNullOrWhiteSpace(Env("JitsiUserDataDir")))
+            config.JitsiUserDataDir = Env("JitsiUserDataDir");
+        if (int.TryParse(Env("JitsiRemoteDebuggingPort"), out var port))
+            config.JitsiRemoteDebuggingPort = port;
+        if (bool.TryParse(Env("JitsiHeadless"), out var headless))
+            config.JitsiHeadless = headless;
+        if (!string.IsNullOrWhiteSpace(Env("Token")))
+            config.Token = Env("Token");
+        if (!string.IsNullOrWhiteSpace(Env("TelegramBotName")))
+            config.TelegramBotName = Env("TelegramBotName");
+        if (!string.IsNullOrWhiteSpace(Env("JitsiHost")))
+            config.JitsiHost = Env("JitsiHost");
+        if (!string.IsNullOrWhiteSpace(Env("JitsiRoom")))
+            config.JitsiRoom = Env("JitsiRoom");
+        if (!string.IsNullOrWhiteSpace(Env("JitsiUserLogin")))
+            config.JitsiUserLogin = Env("JitsiUserLogin");
+        if (!string.IsNullOrWhiteSpace(Env("JitsiUserPassword")))
+            config.JitsiUserPassword = Env("JitsiUserPassword");
+        if (!string.IsNullOrWhiteSpace(Env("BotName")))
+            config.BotName = Env("BotName");
     }
 }

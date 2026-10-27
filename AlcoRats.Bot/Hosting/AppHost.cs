@@ -24,10 +24,7 @@ public static class AppHost
         if (_services != null)
             return _services;
 
-        var logDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "AlcoRats.Bot",
-            "logs");
+        var logDirectory = ResolveLogDirectory();
         Directory.CreateDirectory(logDirectory);
 
         var minimumLevel =
@@ -113,5 +110,22 @@ public static class AppHost
                 disposable.Dispose();
             _services = null;
         }
+    }
+
+    /// <summary>
+    /// Prefers <c>LogDirectory</c> env (Docker: /data/logs). Falls back to LocalApplicationData,
+    /// then <c>AppContext.BaseDirectory/logs</c> when LocalApplicationData is empty (common in containers).
+    /// </summary>
+    private static string ResolveLogDirectory()
+    {
+        var fromEnv = Environment.GetEnvironmentVariable("LogDirectory");
+        if (!string.IsNullOrWhiteSpace(fromEnv))
+            return fromEnv.Trim();
+
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(localAppData))
+            return Path.Combine(localAppData, "AlcoRats.Bot", "logs");
+
+        return Path.Combine(AppContext.BaseDirectory, "logs");
     }
 }

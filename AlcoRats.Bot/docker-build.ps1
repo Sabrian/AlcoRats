@@ -5,7 +5,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$Tag = 'alcorats-bot:latest'
+    [string]$Tag = 'alcorats-bot:latest',
+    [switch]$NoCache
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,11 +39,18 @@ Write-Host ''
 
 Push-Location $repoRoot
 try {
-    docker build `
-        -f $dockerfile `
-        -t $Tag `
-        --build-arg BUILD_CONFIGURATION=Release `
-        .
+    $buildArgs = @(
+        'build'
+        '-f', $dockerfile
+        '-t', $Tag
+        '--build-arg', 'BUILD_CONFIGURATION=Release'
+    )
+    if ($NoCache) {
+        $buildArgs += '--no-cache'
+    }
+    $buildArgs += '.'
+
+    docker @buildArgs
 
     if ($LASTEXITCODE -ne 0) {
         Write-Error "docker build failed with exit code $LASTEXITCODE"

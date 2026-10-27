@@ -57,11 +57,12 @@ $dockerArgs = @(
     '--init'
     '--shm-size', '1g'
     '--restart', 'unless-stopped'
-    '-e', 'ChromiumExecutablePath=/usr/bin/google-chrome-stable'
+    '-e', 'ChromiumExecutablePath=/opt/google/chrome/chrome'
     '-e', 'JitsiUserDataDir=/data/chromium-profile'
     '-e', 'JitsiRemoteDebuggingPort=9333'
     '-e', 'JitsiHeadless=true'
     '-e', 'LiteDbPath=/data/data.db'
+    '-e', 'LogDirectory=/data/logs'
     '-p', '9333:9333'
     '-v', "${DataDir}:/data"
 )

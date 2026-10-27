@@ -319,6 +319,10 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
     private async Task MonitorChatAsync(CancellationToken cancellationToken)
     {
+        // History often loads a few seconds after join; absorb without raising events.
+        var absorbUntil = DateTime.UtcNow.AddSeconds(8);
+        var joinCutoff = (_joinedAt ?? DateTime.UtcNow).AddSeconds(-5);
+
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -348,7 +352,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                     _logger.LogWarning("Chat collect error: {Error}", snapshot.Error);
 
                 var messages = snapshot?.Messages ?? Array.Empty<ChatMessageDto>();
-                if (!_chatBaselineReady)
+                var absorbing = DateTime.UtcNow < absorbUntil;
+
+                if (!_chatBaselineReady || absorbing)
                 {
                     foreach (var message in messages)
                     {
@@ -356,12 +362,16 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                             _seenChatMessageIds.Add(message.Id);
                     }
 
-                    _chatBaselineReady = true;
-                    _logger.LogInformation(
-                        "Chat baseline captured ({Count} messages, appPresent={AppPresent}, hooked={Hooked})",
-                        _seenChatMessageIds.Count,
-                        snapshot?.AppPresent,
-                        snapshot?.Hooked);
+                    if (!_chatBaselineReady)
+                    {
+                        _chatBaselineReady = true;
+                        _logger.LogInformation(
+                            "Chat baseline captured ({Count} messages, appPresent={AppPresent}, hooked={Hooked}); absorbing history until {AbsorbUntil:u}",
+                            _seenChatMessageIds.Count,
+                            snapshot?.AppPresent,
+                            snapshot?.Hooked,
+                            absorbUntil);
+                    }
                 }
                 else
                 {
@@ -374,14 +384,20 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                         if (string.IsNullOrWhiteSpace(message.Text))
                             continue;
 
+                        var timestamp = message.TimestampMs is > 0
+                            ? DateTimeOffset.FromUnixTimeMilliseconds(message.TimestampMs.Value)
+                            : DateTimeOffset.UtcNow;
+
+                        // Drop pre-join / history messages that slipped past baseline with new ids.
+                        if (timestamp < joinCutoff)
+                            continue;
+
                         var chatMessage = new ChatMessage
                         {
                             Id = message.Id,
                             Text = message.Text.Trim(),
                             Sender = string.IsNullOrWhiteSpace(message.Sender) ? "Unknown" : message.Sender.Trim(),
-                            Timestamp = message.TimestampMs is > 0
-                                ? DateTimeOffset.FromUnixTimeMilliseconds(message.TimestampMs.Value)
-                                : DateTimeOffset.UtcNow,
+                            Timestamp = timestamp,
                             IsLocal = message.Local,
                         };
 
@@ -1190,13 +1206,16 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             try {
                 var app = window.APP;
                 if (!window.__arChat) {
-                    window.__arChat = { hooked: false, queue: [], seen: {} };
+                    window.__arChat = { hooked: false, queue: [], seen: {}, suppressUntil: 0 };
                 }
                 var hook = window.__arChat;
                 if (hook.hooked)
                     return JSON.stringify({ ok: true, hooked: true });
                 if (!app || !app.store || typeof app.store.getState !== 'function')
                     return JSON.stringify({ ok: false, hooked: false, reason: 'no-app' });
+
+                // Absorb join/history traffic; do not enqueue until this passes.
+                hook.suppressUntil = Date.now() + 8000;
 
                 function mapMessage(m) {
                     if (!m || m.isReaction) return null;
@@ -1223,16 +1242,19 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                     };
                 }
 
+                function enqueueMapped(mapped) {
+                    if (!mapped || hook.seen[mapped.id]) return;
+                    hook.seen[mapped.id] = true;
+                    if (Date.now() < hook.suppressUntil) return;
+                    hook.queue.push(mapped);
+                }
+
                 function enqueueFromStore() {
                     try {
                         var chat = app.store.getState()['features/chat'] || {};
                         var messages = chat.messages || [];
-                        for (var i = 0; i < messages.length; i++) {
-                            var mapped = mapMessage(messages[i]);
-                            if (!mapped || hook.seen[mapped.id]) continue;
-                            hook.seen[mapped.id] = true;
-                            hook.queue.push(mapped);
-                        }
+                        for (var i = 0; i < messages.length; i++)
+                            enqueueMapped(mapMessage(messages[i]));
                     } catch (eStore) {}
                 }
 
@@ -1261,16 +1283,15 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                                     var p = conf.getParticipantById && conf.getParticipantById(id);
                                     name = (p && (p.getDisplayName && p.getDisplayName() || p._displayName)) || '';
                                 } catch (eName) {}
+                                var tsMs = typeof ts === 'number' ? (ts < 1e12 ? ts * 1000 : ts) : Date.now();
                                 var mid = String(ts || Date.now()) + ':' + String(id || '') + ':' + String(text || '');
-                                if (hook.seen[mid]) return;
-                                hook.seen[mid] = true;
                                 var myId2 = '';
                                 try { myId2 = String(conf.getMyUserId && conf.getMyUserId() || ''); } catch (e2) {}
-                                hook.queue.push({
+                                enqueueMapped({
                                     id: mid,
                                     text: String(text || ''),
                                     sender: String(name || id || ''),
-                                    timestampMs: typeof ts === 'number' ? (ts < 1e12 ? ts * 1000 : ts) : Date.now(),
+                                    timestampMs: tsMs,
                                     local: !!(myId2 && id && String(id) === myId2)
                                 });
                             } catch (eMsg) {}
@@ -1298,13 +1319,11 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 var hooked = !!(window.__arChat && window.__arChat.hooked);
                 var result = [];
 
-                // Drain event queue first (from store.subscribe / conference.on).
-                if (window.__arChat && window.__arChat.queue && window.__arChat.queue.length) {
-                    result = window.__arChat.queue.splice(0, window.__arChat.queue.length);
-                }
-
-                // Also snapshot current store messages (dedupe happens in C#).
-                if (app && app.store && typeof app.store.getState === 'function') {
+                // When hooked, only drain the live queue (store dump re-surfaces history with other ids).
+                if (hooked) {
+                    if (window.__arChat.queue && window.__arChat.queue.length)
+                        result = window.__arChat.queue.splice(0, window.__arChat.queue.length);
+                } else if (app && app.store && typeof app.store.getState === 'function') {
                     var chat = app.store.getState()['features/chat'] || {};
                     var messages = chat.messages || [];
                     var myId = '';

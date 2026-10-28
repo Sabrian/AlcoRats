@@ -7,6 +7,7 @@
             <SolidColorBrush x:Key="StatusBarBackgroundBrush" Color="#040404" />
             <SolidColorBrush x:Key="StatusBarForegroundBrush" Color="#E8E8ED" />
             <SolidColorBrush x:Key="HangupIconBrush" Color="#E53935" />
+            <SolidColorBrush x:Key="GoLiveButtonBrush" Color="#1E88E5" />
         </ResourceDictionary>
 
         <ResourceDictionary x:Key="Light">
@@ -15,6 +16,7 @@
             <SolidColorBrush x:Key="StatusBarBackgroundBrush" Color="#F7F7FA" />
             <SolidColorBrush x:Key="StatusBarForegroundBrush" Color="#1C1B1F" />
             <SolidColorBrush x:Key="HangupIconBrush" Color="#E53935" />
+            <SolidColorBrush x:Key="GoLiveButtonBrush" Color="#1E88E5" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 </ResourceDictionary>

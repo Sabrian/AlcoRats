@@ -19,6 +19,9 @@ public class AppSettings
 
     public string Password { get; set; } = "";
 
+    /// <summary>Email for Gravatar avatar in the Jitsi room (optional).</summary>
+    public string Gravatar { get; set; } = "";
+
     /// <summary>Jitsi room path segment on the meet host (e.g. AlcoRats).</summary>
     public string RoomName { get; set; } = "AlcoRats";
 

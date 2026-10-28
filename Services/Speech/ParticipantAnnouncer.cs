@@ -9,8 +9,9 @@ namespace AlcoRats.Services.Speech;
 
 /// <summary>
 /// Announces remote participant join/leave with Piper (or fallback TTS).
-/// Leaves are confirmed across consecutive snapshots to avoid false “left”
-/// when the WebView briefly publishes a partial/empty participant list.
+/// Leaves require sustained absence (wall-clock), not just two rapid Redux
+/// snapshots — store.subscribe can publish a partial roster several times
+/// while someone is still joining.
 /// </summary>
 public sealed class ParticipantAnnouncer(
     IConferenceSession conference,
@@ -18,14 +19,22 @@ public sealed class ParticipantAnnouncer(
     AppSettings settings,
     ILogger<ParticipantAnnouncer> logger)
 {
-    /// <summary>Misses required before speaking leave (normal shrink).</summary>
-    private const int LeaveConfirmHits = 2;
+    /// <summary>How long a remote must be missing before leave TTS.</summary>
+    private static readonly TimeSpan LeaveConfirm = TimeSpan.FromSeconds(3);
 
-    /// <summary>Misses when the remote list goes fully empty while still in-call (Redux glitch).</summary>
-    private const int LeaveConfirmHitsOnEmptyList = 3;
+    /// <summary>
+    /// If they were only visible this briefly, treat vanish as roster flicker —
+    /// drop silently (no «выкатился»).
+    /// </summary>
+    private static readonly TimeSpan MinPresenceForLeaveAnnounce = TimeSpan.FromSeconds(2.5);
+
+    /// <summary>Extra leave wait right after we first saw them (join is still settling).</summary>
+    private static readonly TimeSpan RecentJoinLeaveConfirm = TimeSpan.FromSeconds(5);
+
     private readonly Lock _gate = new();
     private Dictionary<string, string> _known = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, int> _pendingLeave = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _seenSinceUtc = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _missingSinceUtc = new(StringComparer.Ordinal);
     private bool _baselineReady;
     private bool _started;
 
@@ -50,7 +59,8 @@ public sealed class ParticipantAnnouncer(
         lock (_gate)
         {
             _known.Clear();
-            _pendingLeave.Clear();
+            _seenSinceUtc.Clear();
+            _missingSinceUtc.Clear();
             _baselineReady = false;
         }
 
@@ -63,14 +73,17 @@ public sealed class ParticipantAnnouncer(
         {
             if (!state.IsActive)
             {
+                // Local user left / home screen — never announce others as "left".
                 if (_known.Count > 0 || _baselineReady)
-                    logger.LogDebug("Conference inactive — clearing participant baseline");
+                    logger.LogDebug("Conference inactive — clearing participant baseline (no leave TTS)");
                 _known.Clear();
-                _pendingLeave.Clear();
+                _seenSinceUtc.Clear();
+                _missingSinceUtc.Clear();
                 _baselineReady = false;
                 return;
             }
 
+            var now = DateTime.UtcNow;
             var current = state.Participants
                 .Where(p => !p.IsLocal && !string.IsNullOrWhiteSpace(p.Id))
                 .GroupBy(p => p.Id, StringComparer.Ordinal)
@@ -79,19 +92,22 @@ public sealed class ParticipantAnnouncer(
             if (!_baselineReady)
             {
                 _known = new Dictionary<string, string>(current, StringComparer.Ordinal);
-                _pendingLeave.Clear();
+                _seenSinceUtc.Clear();
+                foreach (var id in current.Keys)
+                    _seenSinceUtc[id] = now;
+                _missingSinceUtc.Clear();
                 _baselineReady = true;
                 logger.LogInformation("Participant baseline ready ({Count} remote)", current.Count);
                 return;
             }
 
             // Returned after a flicker — cancel pending leave, do not re-announce join.
-            foreach (var id in _pendingLeave.Keys.ToList())
+            foreach (var id in _missingSinceUtc.Keys.ToList())
             {
                 if (current.ContainsKey(id))
                 {
                     logger.LogDebug("Participant leave cancelled (returned): {Id}", id);
-                    _pendingLeave.Remove(id);
+                    _missingSinceUtc.Remove(id);
                 }
             }
 
@@ -105,44 +121,91 @@ public sealed class ParticipantAnnouncer(
 
                 logger.LogInformation("Participant joined: {Id} ({Name})", id, name);
                 _known[id] = name;
+                _seenSinceUtc[id] = now;
+                _missingSinceUtc.Remove(id);
                 AnnounceJoin(name);
             }
 
             var vanished = _known.Keys.Where(id => !current.ContainsKey(id)).ToList();
-            var suspiciousEmpty = current.Count == 0 && _known.Count > 0;
-            var needHits = suspiciousEmpty ? LeaveConfirmHitsOnEmptyList : LeaveConfirmHits;
+            if (vanished.Count == 0)
+                return;
 
-            if (suspiciousEmpty && vanished.Count > 0)
+            // Whole roster (or all remotes) vanished while still "active" → local hangup /
+            // teardown, not everyone leaving. Clear silently, never TTS leave.
+            var massDisconnect = current.Count == 0
+                                 || vanished.Count >= _known.Count
+                                 || (vanished.Count >= 2 && current.Count == 0);
+            if (massDisconnect)
             {
                 logger.LogDebug(
-                    "Ignoring empty remote list for leave ({Pending} known) — need {Hits} confirms",
-                    _known.Count,
-                    needHits);
+                    "Suppressing leave TTS — mass disconnect ({Vanished}/{Known} remotes gone)",
+                    vanished.Count,
+                    _known.Count);
+                foreach (var id in vanished)
+                    Forget(id);
+
+                return;
             }
 
             foreach (var id in vanished)
             {
-                _pendingLeave.TryGetValue(id, out var hits);
-                hits++;
-                if (hits < needHits)
+                if (!_missingSinceUtc.TryGetValue(id, out var missingSince))
                 {
-                    _pendingLeave[id] = hits;
+                    _missingSinceUtc[id] = now;
                     logger.LogDebug(
-                        "Participant leave pending {Hits}/{Need}: {Id} ({Name})",
-                        hits,
-                        needHits,
+                        "Participant leave pending (first miss): {Id} ({Name})",
                         id,
                         _known[id]);
                     continue;
                 }
 
+                var seenSince = _seenSinceUtc.TryGetValue(id, out var s) ? s : missingSince;
+                var presentFor = missingSince - seenSince;
+                var requiredAbsent = presentFor < MinPresenceForLeaveAnnounce
+                    ? RecentJoinLeaveConfirm
+                    : LeaveConfirm;
+
+                var absentFor = now - missingSince;
+                if (absentFor < requiredAbsent)
+                {
+                    logger.LogDebug(
+                        "Participant leave pending {Absent:0.0}s/{Need:0.0}s: {Id} ({Name})",
+                        absentFor.TotalSeconds,
+                        requiredAbsent.TotalSeconds,
+                        id,
+                        _known[id]);
+                    continue;
+                }
+
+                // Still too new overall — ghost/join flicker, drop without TTS.
+                if (presentFor < MinPresenceForLeaveAnnounce)
+                {
+                    logger.LogDebug(
+                        "Suppressing leave TTS — brief presence {Present:0.0}s: {Id} ({Name})",
+                        presentFor.TotalSeconds,
+                        id,
+                        _known[id]);
+                    Forget(id);
+                    continue;
+                }
+
                 var name = _known[id];
-                logger.LogInformation("Participant left: {Id} ({Name})", id, name);
-                _known.Remove(id);
-                _pendingLeave.Remove(id);
+                logger.LogInformation(
+                    "Participant left (absent {Absent:0.0}s): {Id} ({Name})",
+                    absentFor.TotalSeconds,
+                    id,
+                    name);
+                Forget(id);
                 AnnounceLeave(name);
             }
         }
+    }
+
+    private void Forget(string id)
+    {
+        _known.Remove(id);
+        _seenSinceUtc.Remove(id);
+        _missingSinceUtc.Remove(id);
     }
 
     private void AnnounceJoin(string name)

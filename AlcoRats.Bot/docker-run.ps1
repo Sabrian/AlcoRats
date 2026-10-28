@@ -44,6 +44,7 @@ if ([string]::IsNullOrWhiteSpace($DataDir)) {
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir 'chromium-profile') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir 'logs') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir 'piper') | Out-Null
 
 $existing = docker ps -a --filter "name=^/${Name}$" --format '{{.ID}}'
 if ($existing) {
@@ -63,6 +64,8 @@ $dockerArgs = @(
     '-e', 'JitsiHeadless=true'
     '-e', 'LiteDbPath=/data/data.db'
     '-e', 'LogDirectory=/data/logs'
+    '-e', 'PiperCacheDir=/app/Speech'
+    '-e', 'PiperVoice=dmitri'
     '-e', 'DBUS_SESSION_BUS_ADDRESS=/dev/null'
     '-e', 'DBUS_SYSTEM_BUS_ADDRESS=/dev/null'
     '-p', '9333:9333'

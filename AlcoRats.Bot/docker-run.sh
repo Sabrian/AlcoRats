@@ -26,7 +26,7 @@ if [[ "${REBUILD}" == "1" ]]; then
   "${SCRIPT_DIR}/docker-build.sh" "${TAG}"
 fi
 
-mkdir -p "${DATA_DIR}/chromium-profile" "${DATA_DIR}/logs"
+mkdir -p "${DATA_DIR}/chromium-profile" "${DATA_DIR}/logs" "${DATA_DIR}/piper"
 
 if docker ps -a --format '{{.Names}}' | grep -qx "${NAME}"; then
   echo "Removing existing container: ${NAME}"
@@ -45,6 +45,8 @@ ARGS=(
   -e JitsiHeadless=true
   -e LiteDbPath=/data/data.db
   -e LogDirectory=/data/logs
+  -e PiperCacheDir=/app/Speech
+  -e PiperVoice=dmitri
   -e DBUS_SESSION_BUS_ADDRESS=/dev/null
   -e DBUS_SYSTEM_BUS_ADDRESS=/dev/null
   -p 9333:9333

@@ -19,6 +19,7 @@ public class Application : AvaloniaAndroidApplication<App>
     protected override AppBuilder CustomizeAppBuilder(AppBuilder builder)
     {
         WebViewMediaPermissionBridge.Register();
+        CrashUi.Register();
 
         AppHost.Initialize(services =>
         {

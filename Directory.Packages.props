@@ -13,6 +13,7 @@
     <PackageVersion Include="Avalonia.Controls.WebView" Version="12.1.1" />
     <PackageVersion Include="AvaloniaUI.DiagnosticsSupport" Version="2.2.3" />
     <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageVersion Include="Google.GenAI" Version="1.27.0" />
     <PackageVersion Include="LiteDB" Version="5.0.21" />
     <PackageVersion Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.24.2-preview.1" />
     <PackageVersion Include="Telegram.Bot" Version="22.10.3.3" />

@@ -58,6 +58,18 @@
                 </StackPanel>
 
                 <StackPanel Spacing="6">
+                    <TextBlock Text="Граватар"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                    <TextBox Text="{Binding Settings.Gravatar}"
+                             PlaceholderText="email@example.com" />
+                    <TextBlock Text="Email для аватара Gravatar в комнате Jitsi."
+                               Opacity="0.65"
+                               FontSize="12"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
                     <TextBlock Text="Комната"
                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
                     <TextBox Text="{Binding Settings.RoomName}"

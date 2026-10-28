@@ -1,5 +1,6 @@
 using AlcoRats.Bot.Jitsi;
 using AlcoRats.Bot.Services;
+using AlcoRats.Bot.Speech;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog;
@@ -55,7 +56,9 @@ public static class AppHost
         });
 
         services.AddSingleton(Configuration.Instance);
+        services.AddSingleton<PiperTtsSynthesizer>();
         services.AddSingleton<IJitsiBotService, JitsiBotService>();
+        services.AddSingleton<IAIChat, GeminiAiChat>();
         services.AddSingleton<IServiceMain, ServiceMain>();
         services.AddSingleton<ICommandProcessor, CommandProcessor>();
         services.AddSingleton<ICommandProvider, TelegramCommandProvider>();

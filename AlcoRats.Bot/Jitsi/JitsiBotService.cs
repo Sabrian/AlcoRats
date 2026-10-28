@@ -1,5 +1,8 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using AlcoRats.Bot.Models;
+using AlcoRats.Bot.Speech;
 using Microsoft.Extensions.Logging;
 using PuppeteerSharp;
 
@@ -27,7 +30,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
     private readonly Configuration _configuration;
     private readonly ILogger<JitsiBotService> _logger;
+    private readonly PiperTtsSynthesizer _tts;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _speakGate = new(1, 1);
 
     private IBrowser _browser;
     private IPage _page;
@@ -45,10 +50,23 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     private readonly Dictionary<string, string> _knownParticipants = new(StringComparer.Ordinal);
     private bool _participantsBaselineReady;
 
-    public JitsiBotService(Configuration configuration, ILogger<JitsiBotService> logger)
+    public JitsiBotService(
+        Configuration configuration,
+        ILogger<JitsiBotService> logger,
+        PiperTtsSynthesizer tts)
     {
         _configuration = configuration;
         _logger = logger;
+        _tts = tts;
+
+        ThreadPool.QueueUserWorkItem(async (state) =>
+        {
+            while(!_disposed)
+            {
+                Thread.Sleep(15000);
+                await EnsureStartedAsync();
+            }
+        });
     }
 
     public bool IsRunning => _starting || _browser is { IsClosed: false };
@@ -115,6 +133,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
             if (await IsJoinedAsync(_page))
             {
+                // DOM dump showed attach lands already in-room: localStorage alone does not
+                // refresh avatar/email — push profile into the live conference.
+                await ApplyLiveProfileAsync(_page, cancellationToken);
                 _joinedAt ??= DateTime.UtcNow;
                 _logger.LogInformation("Attached to existing joined Jitsi session");
                 return;
@@ -243,6 +264,40 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             functionSource);
     }
 
+    /// <summary>
+    /// Runs an <c>async function(arg) { ... }</c> in the page main world and waits for the result attribute.
+    /// </summary>
+    private static async Task<string> EvaluateInMainWorldAsyncAsync(IPage page, string asyncFunctionSource, object arg)
+    {
+        return await page.EvaluateFunctionAsync<string>(
+            """
+            async (fnSource, arg) => {
+                const attr = 'data-ar-eval-async-result';
+                document.documentElement.removeAttribute(attr);
+                const script = document.createElement('script');
+                const argJson = JSON.stringify(arg);
+                script.textContent =
+                    '(async function(){try{var __arFn=(' + fnSource + ');var __arArg=' + argJson + ';' +
+                    'var __arResult=await __arFn(__arArg);' +
+                    'document.documentElement.setAttribute("' + attr + '",' +
+                    '(typeof __arResult===\'string\')?__arResult:JSON.stringify(__arResult));' +
+                    '}catch(e){document.documentElement.setAttribute("' + attr + '",' +
+                    'JSON.stringify({ok:false,error:String(e&&e.message||e)}));}})();';
+                document.documentElement.appendChild(script);
+                script.remove();
+                const deadline = Date.now() + 180000;
+                while (Date.now() < deadline) {
+                    const v = document.documentElement.getAttribute(attr);
+                    if (v != null) return v;
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                return JSON.stringify({ ok: false, error: 'timeout' });
+            }
+            """,
+            asyncFunctionSource,
+            arg);
+    }
+
     private static TimeSpan ResolveRoomOnline(RoomSnapshot snapshot)
     {
         // Prefer explicit duration already computed in-page (DOM timer / Redux).
@@ -344,6 +399,69 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         finally
         {
             _gate.Release();
+        }
+    }
+
+    public async Task SpeakAsync(string text, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (string.IsNullOrWhiteSpace(text))
+            throw new ArgumentException("Text must not be empty.", nameof(text));
+
+        await EnsureStartedAsync(cancellationToken);
+
+        await _speakGate.WaitAsync(cancellationToken);
+        string wavPath = null;
+        try
+        {
+            wavPath = await _tts.SynthesizeToWavFileAsync(text, cancellationToken);
+            var wavBytes = await File.ReadAllBytesAsync(wavPath, cancellationToken);
+            var wavBase64 = Convert.ToBase64String(wavBytes);
+
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                if (_page == null || _browser is not { IsClosed: false })
+                    throw new InvalidOperationException("Jitsi browser is not available.");
+
+                if (!await IsJoinedAsync(_page))
+                    throw new InvalidOperationException("Jitsi bot is not in the conference.");
+
+                var json = await EvaluateInMainWorldAsyncAsync(_page, PublishWavToConferenceScript, wavBase64);
+                using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+                var root = doc.RootElement;
+                var ok = root.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
+                if (!ok)
+                {
+                    var error = root.TryGetProperty("error", out var errProp)
+                        ? errProp.GetString()
+                        : "unknown";
+                    throw new InvalidOperationException($"Failed to publish Piper WAV to Jitsi: {error}");
+                }
+
+                var durationMs = root.TryGetProperty("durationMs", out var durProp) && durProp.TryGetDouble(out var d)
+                    ? d
+                    : 0;
+                _logger.LogInformation(
+                    "Spoke via Piper ({Engine}), textLength={Length}, durationMs={DurationMs:0}",
+                    _tts.EngineName,
+                    text.Length,
+                    durationMs);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        finally
+        {
+            if (wavPath != null)
+            {
+                try { File.Delete(wavPath); } catch { /* ignore */ }
+            }
+
+            _speakGate.Release();
         }
     }
 
@@ -768,34 +886,165 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     private async Task PrepareProfileAsync(IPage page, string host, CancellationToken cancellationToken)
     {
         var botName = _configuration.BotName ?? string.Empty;
-        var email = _configuration.Gravatar ?? string.Empty;
+        var email = (_configuration.Gravatar ?? string.Empty).Trim();
+        var avatarUrl = BuildGravatarAvatarUrl(email);
 
-        var url = page.Url ?? string.Empty;
-        if (!url.StartsWith(host, StringComparison.OrdinalIgnoreCase))
+        // If already in-conference (attach path), do not navigate away — apply live.
+        if (await IsJoinedAsync(page))
         {
-            await page.GoToAsync(host, new NavigationOptions
-            {
-                WaitUntil = [WaitUntilNavigation.DOMContentLoaded],
-                Timeout = 60_000,
-            });
+            await WriteProfileToLocalStorageAsync(page, botName, email, avatarUrl);
+            await ApplyLiveProfileAsync(page, cancellationToken);
+            await DomSnapshotStore.SaveAsync(page, "01-already-joined-profile", _logger, cancellationToken);
+            return;
         }
 
+        // Always open origin root first so room load reads our localStorage (DOM showed
+        // dump on /alcorats with a foreign gravatar hash — storage was never applied).
+        await page.GoToAsync(host, new NavigationOptions
+        {
+            WaitUntil = [WaitUntilNavigation.DOMContentLoaded],
+            Timeout = 60_000,
+        });
+
+        await WriteProfileToLocalStorageAsync(page, botName, email, avatarUrl);
+
+        _logger.LogInformation(
+            "Bot profile cached: {BotName} email={Email} avatar={Avatar}",
+            botName,
+            string.IsNullOrEmpty(email) ? "(none)" : email,
+            string.IsNullOrEmpty(avatarUrl) ? "(none)" : avatarUrl);
+        await DomSnapshotStore.SaveAsync(page, "01-host-profile", _logger, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static async Task WriteProfileToLocalStorageAsync(
+        IPage page,
+        string botName,
+        string email,
+        string avatarUrl)
+    {
         await page.EvaluateFunctionAsync(
             """
-            (name, email) => {
+            (name, email, avatarUrl) => {
                 localStorage.setItem('features/base/profile', JSON.stringify({
                     displayName: name,
-                    email: email
+                    email: email,
+                    avatarURL: avatarUrl || undefined
                 }));
+                try {
+                    var settingsRaw = localStorage.getItem('features/base/settings');
+                    var settings = settingsRaw ? JSON.parse(settingsRaw) : {};
+                    if (!settings || typeof settings !== 'object') settings = {};
+                    settings.displayName = name;
+                    settings.email = email;
+                    if (avatarUrl) settings.avatarURL = avatarUrl;
+                    localStorage.setItem('features/base/settings', JSON.stringify(settings));
+                } catch (eSettings) {}
                 localStorage.setItem('displayname', name);
                 localStorage.setItem('email', email);
+                if (avatarUrl) localStorage.setItem('avatarURL', avatarUrl);
             }
             """,
             botName,
-            email);
+            email,
+            avatarUrl ?? "");
+    }
 
-        _logger.LogInformation("Bot profile cached: {BotName} ({Email})", botName, email);
+    /// <summary>
+    /// Pushes display name / email / avatar into a live conference (DOM: Jitsi keeps using
+    /// old gravatar hash until settings/conference APIs are updated).
+    /// </summary>
+    private async Task ApplyLiveProfileAsync(IPage page, CancellationToken cancellationToken)
+    {
+        var botName = _configuration.BotName ?? string.Empty;
+        var email = (_configuration.Gravatar ?? string.Empty).Trim();
+        var avatarUrl = BuildGravatarAvatarUrl(email);
+
+        await WriteProfileToLocalStorageAsync(page, botName, email, avatarUrl);
+
+        var json = await EvaluateInMainWorldAsync(
+            page,
+            $$"""
+            function() {
+                var name = {{JsonSerializer.Serialize(botName)}};
+                var email = {{JsonSerializer.Serialize(email)}};
+                var avatarUrl = {{JsonSerializer.Serialize(avatarUrl ?? "")}};
+                var via = [];
+                try {
+                    var app = window.APP;
+                    if (!app)
+                        return JSON.stringify({ ok: false, error: 'no-app' });
+
+                    try {
+                        if (app.conference) {
+                            if (typeof app.conference.changeLocalDisplayName === 'function') {
+                                app.conference.changeLocalDisplayName(name);
+                                via.push('changeLocalDisplayName');
+                            }
+                            if (email && typeof app.conference.changeLocalEmail === 'function') {
+                                app.conference.changeLocalEmail(email);
+                                via.push('changeLocalEmail');
+                            }
+                            if (avatarUrl && typeof app.conference.changeLocalAvatarUrl === 'function') {
+                                app.conference.changeLocalAvatarUrl(avatarUrl);
+                                via.push('changeLocalAvatarUrl');
+                            }
+                        }
+                    } catch (eConf) { via.push('conf-error:' + String(eConf && eConf.message || eConf)); }
+
+                    try {
+                        if (app.store && typeof app.store.dispatch === 'function') {
+                            app.store.dispatch({
+                                type: 'UPDATE_SETTINGS',
+                                settings: {
+                                    displayName: name,
+                                    email: email || undefined,
+                                    avatarURL: avatarUrl || undefined
+                                }
+                            });
+                            via.push('UPDATE_SETTINGS');
+                            app.store.dispatch({
+                                type: 'SETTINGS_UPDATED',
+                                settings: {
+                                    displayName: name,
+                                    email: email || undefined,
+                                    avatarURL: avatarUrl || undefined
+                                }
+                            });
+                            via.push('SETTINGS_UPDATED');
+                        }
+                    } catch (eStore) { via.push('store-error:' + String(eStore && eStore.message || eStore)); }
+
+                    try {
+                        if (app.conference && app.conference._room
+                            && typeof app.conference._room.setLocalParticipantProperty === 'function') {
+                            if (email) app.conference._room.setLocalParticipantProperty('email', email);
+                            if (avatarUrl) app.conference._room.setLocalParticipantProperty('avatar-url', avatarUrl);
+                            via.push('setLocalParticipantProperty');
+                        }
+                    } catch (eRoom) { via.push('room-error:' + String(eRoom && eRoom.message || eRoom)); }
+
+                    return JSON.stringify({ ok: true, via: via, email: email, avatarUrl: avatarUrl });
+                } catch (e) {
+                    return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+                }
+            }
+            """);
+
+        _logger.LogInformation("Live profile applied: {Result}", json);
         cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static string BuildGravatarAvatarUrl(string email)
+    {
+        if (string.IsNullOrWhiteSpace(email) || email.IndexOf('@') < 0)
+            return "";
+
+        var normalized = email.Trim().ToLowerInvariant();
+        var hash = Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(normalized)))
+            .ToLowerInvariant();
+        // DOM used size=200 and d=404 (broken when no gravatar). Force identicon fallback.
+        return $"https://www.gravatar.com/avatar/{hash}?d=identicon&s=200";
     }
 
     private async Task JoinConferenceAsync(IPage page, CancellationToken cancellationToken)
@@ -806,6 +1055,20 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         var joinUrl =
             $"{roomUrl}#config.startWithAudioMuted=true&config.startWithVideoMuted=true";
 
+        // HTTP Basic Auth (some Prosody Secure Domain setups).
+        try
+        {
+            await page.AuthenticateAsync(new Credentials
+            {
+                Username = _configuration.JitsiUserLogin,
+                Password = _configuration.JitsiUserPassword,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "page.AuthenticateAsync skipped");
+        }
+
         _logger.LogInformation("Navigating to room {RoomUrl}", roomUrl);
         await page.GoToAsync(joinUrl, new NavigationOptions
         {
@@ -813,12 +1076,18 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             Timeout = 60_000,
         });
 
-        // Login dialog may appear before or after the prejoin Join click.
-        await SignInAsAccountAsync(page, requireDialog: false, timeout: TimeSpan.FromSeconds(12), cancellationToken);
+        // Let prejoin UI settle before dump / login probing.
+        await Task.Delay(1500, cancellationToken);
+        await DomSnapshotStore.SaveAsync(page, "02-prejoin", _logger, cancellationToken);
 
-        if (await IsJoinedAsync(page))
+        // Login dialog may appear before or after the prejoin Join click.
+        await SignInAsAccountAsync(page, requireDialog: false, timeout: TimeSpan.FromSeconds(15), cancellationToken);
+        await DomSnapshotStore.SaveAsync(page, "03-after-auth-soft", _logger, cancellationToken);
+
+        if (await IsJoinedAsync(page) && await HasAuthenticatedSessionAsync(page))
         {
             _joinedAt = DateTime.UtcNow;
+            await DomSnapshotStore.SaveAsync(page, "06-joined-early", _logger, cancellationToken);
             _logger.LogInformation("Already in conference after login: {RoomUrl}", roomUrl);
             return;
         }
@@ -836,10 +1105,26 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             _logger.LogWarning(ex, "Failed to click join button");
         }
 
-        await SignInAsAccountAsync(page, requireDialog: true, timeout: TimeSpan.FromSeconds(25), cancellationToken);
+        await Task.Delay(1000, cancellationToken);
+        await DomSnapshotStore.SaveAsync(page, "04-after-join-click", _logger, cancellationToken);
 
-        await WaitUntilJoinedAsync(page, TimeSpan.FromSeconds(30), cancellationToken);
+        // Secure Domain login often appears only after Join.
+        await SignInAsAccountAsync(page, requireDialog: true, timeout: TimeSpan.FromSeconds(45), cancellationToken);
+        await DomSnapshotStore.SaveAsync(page, "05-after-auth-hard", _logger, cancellationToken);
+
+        await WaitUntilJoinedAsync(page, TimeSpan.FromSeconds(45), cancellationToken);
+
+        if (!await HasAuthenticatedSessionAsync(page) && !await IsModeratorOrLoggedInAsync(page))
+        {
+            await DomSnapshotStore.SaveAsync(page, "05b-auth-failed", _logger, cancellationToken);
+            await LogLoginDiagnosticsAsync(page);
+            throw new InvalidOperationException(
+                "Joined the room but account authentication was not confirmed; refusing anonymous session.");
+        }
+
         _joinedAt = DateTime.UtcNow;
+        await ApplyLiveProfileAsync(page, cancellationToken);
+        await DomSnapshotStore.SaveAsync(page, "06-joined", _logger, cancellationToken);
         _logger.LogInformation("Jitsi bot is in the room as {Login}: {RoomUrl}",
             _configuration.JitsiUserLogin,
             roomUrl);
@@ -864,15 +1149,38 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
         var deadline = DateTime.UtcNow + timeout;
         var submitted = false;
+        var lobbyDumped = false;
+        var apiAuthTried = false;
 
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (await IsJoinedAsync(page) || await HasAuthenticatedSessionAsync(page))
+            if (await HasAuthenticatedSessionAsync(page) || await IsModeratorOrLoggedInAsync(page))
             {
                 _logger.LogInformation("Using existing authenticated Jitsi session");
                 return;
+            }
+
+            // DOM: "Waiting for a moderator… Log-in" — guest join landed in lobby;
+            // force host login instead of waiting anonymously.
+            if (await IsWaitingForModeratorLobbyAsync(page))
+            {
+                if (!lobbyDumped)
+                {
+                    lobbyDumped = true;
+                    _logger.LogInformation(
+                        "Moderator lobby detected — forcing account Log-in as {Login}",
+                        login);
+                    await DomSnapshotStore.SaveAsync(page, "04b-moderator-lobby", _logger, cancellationToken);
+                }
+
+                await TryClickAuthTriggersAsync(page);
+                if (!apiAuthTried)
+                {
+                    apiAuthTried = true;
+                    await TryAuthenticateViaApiAsync(page, login, password);
+                }
             }
 
             if (await TryFillAndSubmitLoginAsync(page, login, password))
@@ -897,16 +1205,20 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 break;
 
             await TryClickAuthTriggersAsync(page);
-            await Task.Delay(400, cancellationToken);
+            await Task.Delay(500, cancellationToken);
         }
 
         if (!submitted)
         {
-            if (await IsJoinedAsync(page) || await HasAuthenticatedSessionAsync(page))
+            if (await HasAuthenticatedSessionAsync(page) || await IsModeratorOrLoggedInAsync(page))
             {
                 _logger.LogInformation("No login form — authenticated session already present");
                 return;
             }
+
+            // Already in the call and clearly logged in as account — OK.
+            if (await IsJoinedAsync(page) && await IsModeratorOrLoggedInAsync(page))
+                return;
 
             if (!requireDialog)
             {
@@ -914,24 +1226,30 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 return;
             }
 
+            await LogLoginDiagnosticsAsync(page);
             throw new InvalidOperationException(
                 "Account login dialog did not appear; refusing anonymous join.");
         }
 
         _logger.LogInformation("Submitted Secure Domain credentials for {Login}", login);
 
-        var hideDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        var hideDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         while (DateTime.UtcNow < hideDeadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!await IsLoginDialogVisibleAsync(page))
+            if (await HasAuthenticatedSessionAsync(page) || await IsModeratorOrLoggedInAsync(page))
                 break;
-            if (await IsJoinedAsync(page) || await HasAuthenticatedSessionAsync(page))
+            if (!await IsLoginDialogVisibleAsync(page) && await IsJoinedAsync(page))
                 break;
+            // Form may reappear after failed attempt — try once more.
+            if (await IsLoginDialogVisibleAsync(page))
+                await TryFillAndSubmitLoginAsync(page, login, password);
             await Task.Delay(500, cancellationToken);
         }
 
-        if (await IsLoginDialogVisibleAsync(page))
+        if (await IsLoginDialogVisibleAsync(page)
+            && !await HasAuthenticatedSessionAsync(page)
+            && !await IsModeratorOrLoggedInAsync(page))
             _logger.LogWarning("Login dialog still visible after submit — credentials may be wrong");
 
         await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
@@ -986,7 +1304,8 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                                 || label.indexOf('присоединиться к встрече') >= 0
                                 || label.indexOf('присоединиться') >= 0
                                 || label === 'join'
-                                || label === 'войти') {
+                                || label.indexOf('start meeting') >= 0) {
+                                // Do not match plain "войти" — that is usually account login.
                                 n.click();
                                 return true;
                             }
@@ -1013,7 +1332,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     {
         try
         {
-            await page.EvaluateFunctionAsync(
+            var clicked = await page.EvaluateFunctionAsync<bool>(
                 """
                 () => {
                     function visible(el) {
@@ -1025,27 +1344,56 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                             return !!(s && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0');
                         } catch (e) { return false; }
                     }
-
-                    var nodes = document.querySelectorAll('a, button, [role="button"], div[class*="button"]');
-                    for (var i = 0; i < nodes.length; i++) {
-                        var el = nodes[i];
-                        if (!visible(el)) continue;
-                        var label = (
-                            (el.innerText || el.textContent || '') + ' ' +
-                            (el.getAttribute('aria-label') || '')
-                        ).toLowerCase().replace(/\s+/g, ' ').trim();
-                        if (!label) continue;
-                        if (label.indexOf('i am the host') >= 0
-                            || label.indexOf('i\'m the host') >= 0
+                    function norm(s) {
+                        return String(s || '')
+                            .toLowerCase()
+                            .replace(/[\u2010-\u2015\u2212\-]+/g, ' ')  // log-in → log in
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                    }
+                    function isAuthLabel(label) {
+                        if (!label) return false;
+                        // Guest join — never treat as host auth.
+                        if (label === 'войти' || label === 'join' || label === 'join meeting'
+                            || label === 'cancel' || label === 'отмена')
+                            return false;
+                        if (label === 'log in' || label === 'login' || label === 'sign in')
+                            return true;
+                        return label.indexOf('i am the host') >= 0
+                            || label.indexOf("i'm the host") >= 0
+                            || label.indexOf('log in') >= 0
                             || label.indexOf('login') >= 0
                             || label.indexOf('sign in') >= 0
-                            || label.indexOf('войти') >= 0
+                            || label.indexOf('become a moderator') >= 0
+                            || label.indexOf('войти как') >= 0
                             || label.indexOf('авториз') >= 0
                             || label.indexOf('я ведущий') >= 0
                             || label.indexOf('я организатор') >= 0
+                            || label.indexOf('я хост') >= 0
+                            || label.indexOf('host login') >= 0
+                            || label.indexOf('authenticate') >= 0
                             || label.indexOf('join in browser') >= 0
                             || label.indexOf('присоединиться в браузер') >= 0
-                            || label.indexOf('продолжить в браузер') >= 0) {
+                            || label.indexOf('продолжить в браузер') >= 0;
+                    }
+
+                    var nodes = document.querySelectorAll(
+                        'a, button, [role="button"], div[class*="button"], span[role="button"]');
+                    // Prefer exact Log-in on the wait-for-moderator dialog.
+                    for (var pass = 0; pass < 2; pass++) {
+                        for (var i = 0; i < nodes.length; i++) {
+                            var el = nodes[i];
+                            if (!visible(el)) continue;
+                            var raw = (el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '');
+                            var label = norm(raw);
+                            if (!isAuthLabel(label)) continue;
+                            if (pass === 0) {
+                                // First pass: short labels that are clearly the lobby Log-in.
+                                if (!(label === 'log in' || label === 'login' || label === 'sign in'
+                                    || label.indexOf('i am the host') >= 0
+                                    || label.indexOf('become a moderator') >= 0))
+                                    continue;
+                            }
                             el.click();
                             return true;
                         }
@@ -1053,10 +1401,120 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                     return false;
                 }
                 """);
+
+            if (clicked)
+                _logger.LogInformation("Clicked host/moderator Log-in trigger");
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Auth trigger click skipped");
+        }
+    }
+
+    private static async Task<bool> IsWaitingForModeratorLobbyAsync(IPage page)
+    {
+        try
+        {
+            return await page.EvaluateFunctionAsync<bool>(
+                """
+                () => {
+                    var text = ((document.body && (document.body.innerText || document.body.textContent)) || '')
+                        .toLowerCase();
+                    return text.indexOf('waiting for a moderator') >= 0
+                        || text.indexOf('no moderators have yet arrived') >= 0
+                        || text.indexOf('become a moderator') >= 0
+                        || text.indexOf('ожидание модератора') >= 0
+                        || text.indexOf('ожидаем модератора') >= 0
+                        || text.indexOf('конференция ещё не началась') >= 0
+                        || text.indexOf('конференция еще не началась') >= 0;
+                }
+                """);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Secure Domain: upgrade anonymous lobby session to authenticated moderator via lib-jitsi-meet.
+    /// </summary>
+    private async Task TryAuthenticateViaApiAsync(IPage page, string login, string password)
+    {
+        try
+        {
+            var json = await EvaluateInMainWorldAsyncAsync(
+                page,
+                """
+                async function(creds) {
+                    var user = creds && creds.user || '';
+                    var pass = creds && creds.pass || '';
+                    var via = [];
+                    try {
+                        var app = window.APP;
+                        if (!app)
+                            return JSON.stringify({ ok: false, error: 'no-app' });
+
+                        async function withTimeout(promise, ms) {
+                            return await Promise.race([
+                                Promise.resolve(promise),
+                                new Promise(function (_, reject) {
+                                    setTimeout(function () { reject(new Error('auth-timeout')); }, ms);
+                                })
+                            ]);
+                        }
+
+                        // Preferred: upgrade role while sitting in wait-for-moderator lobby.
+                        try {
+                            if (app.conference && typeof app.conference.authenticateAndUpgradeRole === 'function') {
+                                await withTimeout(app.conference.authenticateAndUpgradeRole({
+                                    id: user,
+                                    password: pass
+                                }), 8000);
+                                via.push('authenticateAndUpgradeRole');
+                                return JSON.stringify({ ok: true, via: via });
+                            }
+                        } catch (e1) {
+                            via.push('upgrade-error:' + String(e1 && e1.message || e1));
+                        }
+
+                        try {
+                            if (app.conference && app.conference._room
+                                && typeof app.conference._room.authenticateAndUpgradeRole === 'function') {
+                                await withTimeout(app.conference._room.authenticateAndUpgradeRole({
+                                    id: user,
+                                    password: pass
+                                }), 8000);
+                                via.push('_room.authenticateAndUpgradeRole');
+                                return JSON.stringify({ ok: true, via: via });
+                            }
+                        } catch (e2) {
+                            via.push('room-error:' + String(e2 && e2.message || e2));
+                        }
+
+                        // Redux auth dialog open (then DOM fill still runs).
+                        try {
+                            if (app.store && typeof app.store.dispatch === 'function') {
+                                app.store.dispatch({ type: 'OPEN_DIALOG', componentName: 'LoginDialog' });
+                                via.push('OPEN_DIALOG LoginDialog');
+                            }
+                        } catch (e3) {
+                            via.push('dialog-error:' + String(e3 && e3.message || e3));
+                        }
+
+                        return JSON.stringify({ ok: via.length > 0, via: via });
+                    } catch (e) {
+                        return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+                    }
+                }
+                """,
+                new { user = login, pass = password });
+
+            _logger.LogInformation("Jitsi API auth attempt: {Result}", json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Jitsi API auth skipped");
         }
     }
 
@@ -1109,35 +1567,33 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                     return !!(s && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0');
                 } catch (e) { return false; }
             }
-            function meta(el) {
-                return (
-                    (el.name || '') + ' ' + (el.id || '') + ' ' + (el.placeholder || '') + ' ' +
-                    (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('autocomplete') || '')
-                ).toLowerCase();
+            function collectInputs(root, out) {
+                if (!root) return;
+                var list = root.querySelectorAll ? root.querySelectorAll('input') : [];
+                for (var i = 0; i < list.length; i++) out.push(list[i]);
+                var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+                for (var j = 0; j < all.length; j++) {
+                    if (all[j].shadowRoot) collectInputs(all[j].shadowRoot, out);
+                }
             }
             var text = ((document.body && (document.body.innerText || document.body.textContent)) || '').toLowerCase();
             if (text.indexOf('требуется авторизация') >= 0
                 || text.indexOf('authentication required') >= 0
                 || text.indexOf('login required') >= 0
                 || text.indexOf('идентификатор пользователя') >= 0
-                || text.indexOf('пароль пользователя') >= 0)
+                || text.indexOf('пароль пользователя') >= 0
+                || text.indexOf('username') >= 0 && text.indexOf('password') >= 0)
                 return true;
 
-            var user = null, pass = null;
-            var inputs = document.querySelectorAll('input');
+            var inputs = [];
+            collectInputs(document, inputs);
+            var pass = null;
             for (var i = 0; i < inputs.length; i++) {
                 var el = inputs[i];
                 if (!visible(el)) continue;
-                var type = (el.type || 'text').toLowerCase();
-                var m = meta(el);
-                if (type === 'password') pass = el;
-                else if (type === 'text' || type === 'email' || type === 'username' || type === '') {
-                    if (m.indexOf('user') >= 0 || m.indexOf('login') >= 0 || m.indexOf('ident') >= 0
-                        || m.indexOf('пользовател') >= 0 || m.indexOf('логин') >= 0)
-                        user = el;
-                }
+                if ((el.type || '').toLowerCase() === 'password') pass = el;
             }
-            return !!(pass && (user || pass));
+            return !!pass;
         }
         """;
 
@@ -1162,45 +1618,76 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             }
             function setValue(el, value) {
                 if (!el) return;
+                el.focus();
                 var proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
                 var descriptor = proto && Object.getOwnPropertyDescriptor(proto, 'value');
                 if (descriptor && descriptor.set) descriptor.set.call(el, value);
                 else el.value = value;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            }
+            function collectInputs(root, out) {
+                if (!root) return;
+                var list = root.querySelectorAll ? root.querySelectorAll('input') : [];
+                for (var i = 0; i < list.length; i++) out.push(list[i]);
+                var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+                for (var j = 0; j < all.length; j++) {
+                    if (all[j].shadowRoot) collectInputs(all[j].shadowRoot, out);
+                }
             }
 
-            var userEl = null, passEl = null;
-            var inputs = document.querySelectorAll('input');
-            for (var i = 0; i < inputs.length; i++) {
-                var el = inputs[i];
-                if (!visible(el)) continue;
-                var type = (el.type || 'text').toLowerCase();
-                var m = meta(el);
-                if (type === 'password') {
-                    if (!passEl) passEl = el;
-                    continue;
+            var userEl = document.querySelector(
+                'input#username, input#login_username, input[name="username"], input[name="user"], input[autocomplete="username"]');
+            var passEl = document.querySelector(
+                'input#password, input#login_password, input[name="password"], input[type="password"], input[autocomplete="current-password"]');
+
+            var inputs = [];
+            collectInputs(document, inputs);
+
+            if (!passEl || !visible(passEl)) {
+                passEl = null;
+                for (var i = 0; i < inputs.length; i++) {
+                    var el = inputs[i];
+                    if (!visible(el)) continue;
+                    if ((el.type || '').toLowerCase() === 'password') {
+                        passEl = el;
+                        break;
+                    }
                 }
-                if (type !== 'text' && type !== 'email' && type !== 'username' && type !== '')
-                    continue;
-                if (m.indexOf('user') >= 0 || m.indexOf('login') >= 0 || m.indexOf('ident') >= 0
-                    || m.indexOf('пользовател') >= 0 || m.indexOf('логин') >= 0 || m.indexOf('name') >= 0
-                    || el.name === 'username' || el.id === 'login_username')
-                    userEl = el;
             }
-            if (passEl && !userEl) {
+
+            if (!userEl || !visible(userEl)) {
+                userEl = null;
                 for (var j = 0; j < inputs.length; j++) {
                     var t = inputs[j];
                     if (!visible(t) || t === passEl) continue;
                     var tt = (t.type || 'text').toLowerCase();
-                    if (tt === 'text' || tt === 'email' || tt === 'username' || tt === '') {
+                    if (tt !== 'text' && tt !== 'email' && tt !== 'username' && tt !== '')
+                        continue;
+                    var m = meta(t);
+                    if (m.indexOf('user') >= 0 || m.indexOf('login') >= 0 || m.indexOf('ident') >= 0
+                        || m.indexOf('пользовател') >= 0 || m.indexOf('логин') >= 0
+                        || t.name === 'username' || t.id === 'login_username' || t.id === 'username') {
                         userEl = t;
                         break;
                     }
                 }
             }
 
-            // Need at least a password field (Secure Domain / JWT login).
+            // Any visible text field paired with password (Secure Domain dialog).
+            if (passEl && !userEl) {
+                for (var k = 0; k < inputs.length; k++) {
+                    var u = inputs[k];
+                    if (!visible(u) || u === passEl) continue;
+                    var ut = (u.type || 'text').toLowerCase();
+                    if (ut === 'text' || ut === 'email' || ut === 'username' || ut === '') {
+                        userEl = u;
+                        break;
+                    }
+                }
+            }
+
             if (!passEl)
                 return false;
 
@@ -1208,32 +1695,39 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             setValue(passEl, password || '');
 
             var submit = document.querySelector(
-                'button[type="submit"], input[type="submit"], #login_button, button.primary');
+                'button[type="submit"], input[type="submit"], #login_button, button.primary, [data-testid="modal-login-button"]');
             if (submit && visible(submit)) {
                 submit.click();
                 return true;
             }
 
-            var nodes = document.querySelectorAll('button, [role="button"], a');
-            for (var k = 0; k < nodes.length; k++) {
-                var n = nodes[k];
-                if (!visible(n)) continue;
-                var label = ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || ''))
-                    .toLowerCase();
-                if (label.indexOf('login') >= 0 || label.indexOf('sign in') >= 0
-                    || label.indexOf('войти') >= 0 || label.indexOf('ok') >= 0
-                    || label.indexOf('продолжить') >= 0 || label.indexOf('submit') >= 0) {
-                    n.click();
+            var nodes = document.querySelectorAll('button, [role="button"], a, div[class*="button"]');
+            for (var n = 0; n < nodes.length; n++) {
+                var btn = nodes[n];
+                if (!visible(btn)) continue;
+                var label = ((btn.innerText || btn.textContent || '') + ' ' + (btn.getAttribute('aria-label') || ''))
+                    .toLowerCase()
+                    .replace(/[\u2010-\u2015\u2212\-]+/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                if (label === 'cancel' || label === 'отмена')
+                    continue;
+                if (label.indexOf('login') >= 0 || label.indexOf('log in') >= 0 || label.indexOf('sign in') >= 0
+                    || label.indexOf('войти') >= 0 || label === 'ok'
+                    || label.indexOf('продолжить') >= 0 || label.indexOf('submit') >= 0
+                    || label.indexOf('authenticate') >= 0) {
+                    btn.click();
                     return true;
                 }
             }
 
             if (passEl.form) {
-                passEl.form.requestSubmit ? passEl.form.requestSubmit() : passEl.form.submit();
+                if (passEl.form.requestSubmit) passEl.form.requestSubmit();
+                else passEl.form.submit();
                 return true;
             }
 
-            passEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            passEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
             return true;
         }
         """;
@@ -1253,7 +1747,13 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                         if (jwt.jwt || jwt.user)
                             return true;
                         var conf = state['features/base/conference'] || {};
-                        if (conf.authRequired === false && conf.conference)
+                        // Only treat as authed when conference exists and auth is explicitly not required
+                        // OR local participant is already a moderator (Secure Domain success).
+                        if (conf.conference && conf.authRequired === false)
+                            return true;
+                        var parts = state['features/base/participants'] || {};
+                        var local = parts.local;
+                        if (local && (local.role === 'moderator' || local.features && local.features['jitsi_moderator'] === true))
                             return true;
                         return false;
                     } catch (e) {
@@ -1265,6 +1765,82 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         catch
         {
             return false;
+        }
+    }
+
+    private static async Task<bool> IsModeratorOrLoggedInAsync(IPage page)
+    {
+        try
+        {
+            return await page.EvaluateFunctionAsync<bool>(
+                """
+                () => {
+                    try {
+                        if (typeof APP === 'undefined') return false;
+                        if (APP.store && typeof APP.store.getState === 'function') {
+                            var state = APP.store.getState();
+                            var jwt = state['features/base/jwt'] || {};
+                            if (jwt.jwt || jwt.user) return true;
+                            var local = (state['features/base/participants'] || {}).local;
+                            if (local && local.role === 'moderator') return true;
+                        }
+                        if (APP.conference) {
+                            if (typeof APP.conference.isModerator === 'function' && APP.conference.isModerator())
+                                return true;
+                            if (typeof APP.conference.getRole === 'function'
+                                && String(APP.conference.getRole() || '').toLowerCase() === 'moderator')
+                                return true;
+                        }
+                    } catch (e) {}
+                    return false;
+                }
+                """);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task LogLoginDiagnosticsAsync(IPage page)
+    {
+        try
+        {
+            var dump = await page.EvaluateFunctionAsync<string>(
+                """
+                () => {
+                    function visible(el) {
+                        if (!el || !el.getBoundingClientRect) return false;
+                        try {
+                            var r = el.getBoundingClientRect();
+                            if (r.width < 2 || r.height < 2) return false;
+                            var s = window.getComputedStyle(el);
+                            return !!(s && s.display !== 'none' && s.visibility !== 'hidden');
+                        } catch (e) { return false; }
+                    }
+                    var inputs = [];
+                    document.querySelectorAll('input').forEach(function (el) {
+                        if (!visible(el)) return;
+                        inputs.push({
+                            type: el.type || '',
+                            name: el.name || '',
+                            id: el.id || '',
+                            placeholder: el.placeholder || ''
+                        });
+                    });
+                    var body = ((document.body && document.body.innerText) || '').slice(0, 400);
+                    var joined = false;
+                    try {
+                        joined = !!(APP && APP.conference && APP.conference.isJoined && APP.conference.isJoined());
+                    } catch (e) {}
+                    return JSON.stringify({ url: location.href, joined: joined, inputs: inputs, bodyPreview: body });
+                }
+                """);
+            _logger.LogWarning("Login diagnostics: {Dump}", dump);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Login diagnostics failed");
         }
     }
 
@@ -1396,6 +1972,229 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
         return host.Trim().TrimEnd('/');
     }
+
+    /// <summary>
+    /// async function(wavBase64) — decode full WAV, publish via Jitsi local audio track, wait until finished.
+    /// </summary>
+    private const string PublishWavToConferenceScript =
+        """
+        async function(wavBase64) {
+            async function unmuteMicrophone(app, conference) {
+                var via = [];
+
+                // DOM toolbox (from live dump): aria-label="Unmute microphone"
+                try {
+                    var selectors = [
+                        '[aria-label="Unmute microphone"]',
+                        '[aria-label="Unmute"]',
+                        '[aria-label*="Unmute microphone"]',
+                        '[aria-label="Включить микрофон"]',
+                        '[aria-label*="Включить микрофон"]'
+                    ];
+                    for (var s = 0; s < selectors.length; s++) {
+                        var el = document.querySelector(selectors[s]);
+                        if (el) {
+                            el.click();
+                            via.push('dom:' + selectors[s]);
+                            break;
+                        }
+                    }
+                    if (via.length === 0) {
+                        var nodes = document.querySelectorAll('[aria-label], .toolbox-button, [role="button"]');
+                        for (var n = 0; n < nodes.length; n++) {
+                            var lab = String(nodes[n].getAttribute('aria-label') || nodes[n].innerText || '').toLowerCase();
+                            if (lab.indexOf('unmute') >= 0 || lab.indexOf('включить микрофон') >= 0) {
+                                nodes[n].click();
+                                via.push('dom-scan');
+                                break;
+                            }
+                        }
+                    }
+                } catch (eDom) {}
+
+                // UI / APP helper (preferred — updates toolbar mute state).
+                try {
+                    if (app.conference && typeof app.conference.muteAudio === 'function') {
+                        app.conference.muteAudio(false);
+                        via.push('APP.conference.muteAudio(false)');
+                    }
+                } catch (e1) {}
+
+                try {
+                    if (typeof APP !== 'undefined' && APP.conference && typeof APP.conference.muteAudio === 'function') {
+                        APP.conference.muteAudio(false);
+                        via.push('muteAudio');
+                    }
+                } catch (e2) {}
+
+                // Unmute every local audio JitsiTrack.
+                try {
+                    if (conference && typeof conference.getLocalTracks === 'function') {
+                        var locals = conference.getLocalTracks() || [];
+                        for (var i = 0; i < locals.length; i++) {
+                            var tr = locals[i];
+                            if (!tr || typeof tr.getType !== 'function' || tr.getType() !== 'audio')
+                                continue;
+                            if (typeof tr.unmute === 'function') {
+                                await tr.unmute();
+                                via.push('track.unmute');
+                            }
+                            try {
+                                var mt = typeof tr.getTrack === 'function' ? tr.getTrack() : null;
+                                if (mt && mt.enabled === false)
+                                    mt.enabled = true;
+                            } catch (eMt) {}
+                        }
+                    }
+                } catch (e3) {}
+
+                // Redux audio-mute flag when present.
+                try {
+                    if (app.store && typeof app.store.dispatch === 'function') {
+                        app.store.dispatch({ type: 'SET_AUDIO_MUTED', muted: false });
+                        via.push('SET_AUDIO_MUTED');
+                    }
+                } catch (e4) {}
+
+                return via;
+            }
+
+            try {
+                if (!wavBase64 || typeof wavBase64 !== 'string')
+                    return JSON.stringify({ ok: false, error: 'empty-wav' });
+
+                var app = window.APP;
+                if (!app)
+                    return JSON.stringify({ ok: false, error: 'no-app' });
+
+                var conference = null;
+                try {
+                    if (app.store && typeof app.store.getState === 'function') {
+                        var state = app.store.getState();
+                        conference = (state['features/base/conference'] || {}).conference || null;
+                    }
+                } catch (eState) {}
+                if (!conference && app.conference && app.conference._room)
+                    conference = app.conference._room;
+
+                if (!conference)
+                    return JSON.stringify({ ok: false, error: 'no-conference' });
+
+                // Mic must be on before TTS audio is published.
+                var unmuteVia = await unmuteMicrophone(app, conference);
+
+                var binary = atob(wavBase64);
+                var bytes = new Uint8Array(binary.length);
+                for (var i = 0; i < binary.length; i++)
+                    bytes[i] = binary.charCodeAt(i);
+
+                var Ctx = window.AudioContext || window.webkitAudioContext;
+                if (!Ctx)
+                    return JSON.stringify({ ok: false, error: 'no-audiocontext' });
+
+                var ctx = new Ctx();
+                if (ctx.state === 'suspended' && typeof ctx.resume === 'function')
+                    await ctx.resume();
+
+                var audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+                var dest = ctx.createMediaStreamDestination();
+                var source = ctx.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(dest);
+
+                var mediaStream = dest.stream;
+                var mediaTrack = mediaStream.getAudioTracks()[0];
+                if (!mediaTrack)
+                    return JSON.stringify({ ok: false, error: 'no-media-track' });
+                mediaTrack.enabled = true;
+
+                var newTrack = null;
+                var oldTrack = null;
+                var replaced = false;
+
+                if (typeof JitsiMeetJS !== 'undefined'
+                    && typeof JitsiMeetJS.createLocalTracksFromMediaStreams === 'function') {
+                    var created = await JitsiMeetJS.createLocalTracksFromMediaStreams([{
+                        stream: mediaStream,
+                        track: mediaTrack,
+                        mediaType: 'audio',
+                        sourceType: 'audio',
+                        videoType: undefined
+                    }]);
+                    newTrack = created && created[0] ? created[0] : null;
+
+                    if (newTrack && typeof conference.getLocalTracks === 'function') {
+                        var locals = conference.getLocalTracks() || [];
+                        for (var t = 0; t < locals.length; t++) {
+                            if (locals[t] && typeof locals[t].getType === 'function'
+                                && locals[t].getType() === 'audio') {
+                                oldTrack = locals[t];
+                                break;
+                            }
+                        }
+
+                        if (oldTrack && typeof conference.replaceTrack === 'function') {
+                            await conference.replaceTrack(oldTrack, newTrack);
+                            replaced = true;
+                        } else if (typeof conference.addTrack === 'function') {
+                            await conference.addTrack(newTrack);
+                            replaced = true;
+                        }
+                    }
+
+                    if (newTrack && typeof newTrack.unmute === 'function') {
+                        try { await newTrack.unmute(); } catch (eUnmute) {}
+                    }
+                }
+
+                // Ensure UI mute is still off after track swap.
+                await unmuteMicrophone(app, conference);
+
+                var ended = new Promise(function (resolve) {
+                    source.onended = function () { resolve(); };
+                    setTimeout(resolve, Math.ceil((audioBuffer.duration + 0.75) * 1000));
+                });
+
+                source.start(0);
+                await ended;
+
+                if (replaced && newTrack) {
+                    try {
+                        if (oldTrack && typeof conference.replaceTrack === 'function')
+                            await conference.replaceTrack(newTrack, oldTrack);
+                        else if (typeof conference.removeTrack === 'function')
+                            await conference.removeTrack(newTrack);
+                    } catch (eRestore) {}
+
+                    try {
+                        if (oldTrack && typeof oldTrack.mute === 'function')
+                            await oldTrack.mute();
+                    } catch (eRemute) {}
+
+                    try {
+                        if (app.conference && typeof app.conference.muteAudio === 'function')
+                            app.conference.muteAudio(true);
+                    } catch (eMuteUi) {}
+
+                    try {
+                        if (typeof newTrack.dispose === 'function')
+                            newTrack.dispose();
+                    } catch (eDisp) {}
+                }
+
+                try { await ctx.close(); } catch (eClose) {}
+
+                return JSON.stringify({
+                    ok: true,
+                    durationMs: Math.round(audioBuffer.duration * 1000),
+                    replaced: replaced,
+                    micUnmutedVia: unmuteVia
+                });
+            } catch (e) {
+                return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+            }
+        }
+        """;
 
     private const string InstallChatHookScript =
         """

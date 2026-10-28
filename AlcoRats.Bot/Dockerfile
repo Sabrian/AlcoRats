@@ -33,6 +33,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     JitsiHeadless=true \
     LiteDbPath=/data/data.db \
     LogDirectory=/data/logs \
+    PiperCacheDir=/app/Speech \
+    PiperVoice=dmitri \
     DBUS_SESSION_BUS_ADDRESS=/dev/null \
     DBUS_SYSTEM_BUS_ADDRESS=/dev/null
 
@@ -62,7 +64,7 @@ RUN set -eux; \
 WORKDIR /app
 COPY --from=build /app/publish .
 
-RUN mkdir -p /data/chromium-profile /data/logs \
+RUN mkdir -p /data/chromium-profile /data/logs /data/piper \
     && chown -R $APP_UID:$APP_UID /app /data \
     && chmod +x /app/AlcoRats.Bot
 

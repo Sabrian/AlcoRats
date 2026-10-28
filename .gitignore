@@ -9,3 +9,9 @@ obj/
 /publish-out.txt
 AlcoRats.Bot/data/
 /AlcoRats.Bot/docker
+/AlcoRats.Bot/doms
+/AlcoRats.Bot/AlcoRats.Bot.csproj.Backup.tmp
+
+# Piper voice archives (download at runtime / docker build)
+AlcoRats.Bot/Speech/*.tar.bz2
+*.tar.bz2

@@ -20,15 +20,15 @@
     <!--
       NativeWebView sits above Avalonia in its own region, so do not put
       Avalonia overlays on top of it — they won't be visible on Android.
-      Settings overlay hides the WebView while open.
+      Home and Settings hide/dispose the WebView while shown.
 
       Grid (*, Auto): WebView fills leftover space; StatusPanel keeps a real row
       so the native WebView cannot cover the Avalonia bottom bar.
-      System-bar insets are applied by Android MainActivity — do not add them again
-      to StatusPanel (that made the bar look twice as tall).
     -->
     <Panel>
-        <Grid x:Name="ConferencePane" RowDefinitions="*,Auto">
+        <Grid x:Name="ConferencePane"
+              RowDefinitions="*,Auto"
+              IsVisible="False">
             <!-- NativeWebView is created at runtime — WebView2 crashes the XAML previewer. -->
             <Panel x:Name="WebViewHost"
                    Grid.Row="0"
@@ -36,7 +36,7 @@
                    VerticalAlignment="Stretch"
                    ClipToBounds="True">
                 <Border Background="{DynamicResource AppSurfaceBrush}">
-                    <TextBlock Text="Jitsi"
+                    <TextBlock Text="Подключение…"
                                HorizontalAlignment="Center"
                                VerticalAlignment="Center"
                                Opacity="0.45"
@@ -71,7 +71,7 @@
                                 BorderThickness="0"
                                 HorizontalContentAlignment="Center"
                                 VerticalContentAlignment="Center"
-                                ToolTip.Tip="На страницу подключения"
+                                ToolTip.Tip="Домой"
                                 Click="OnConferenceActionClick">
                             <materialIcons:MaterialIcon Kind="Home"
                                                         Width="20"
@@ -98,6 +98,82 @@
                 </Grid>
             </Border>
         </Grid>
+
+        <!-- Lightweight home: no WebView, no Jitsi JS — saves battery until GoLive. -->
+        <Border x:Name="HomeOverlay"
+                IsVisible="True"
+                IsHitTestVisible="True"
+                Background="{DynamicResource AppSurfaceBrush}"
+                ZIndex="40">
+            <Grid RowDefinitions="Auto,*,Auto">
+                <Button Grid.Row="0"
+                        HorizontalAlignment="Right"
+                        Margin="16,16,16,0"
+                        Width="44"
+                        Height="44"
+                        Padding="0"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        ToolTip.Tip="Настройки"
+                        Click="OnSettingsClick">
+                    <materialIcons:MaterialIcon Kind="Cog"
+                                                Width="24"
+                                                Height="24"
+                                                Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                </Button>
+
+                <StackPanel Grid.Row="1"
+                            VerticalAlignment="Center"
+                            HorizontalAlignment="Center"
+                            Spacing="28">
+                    <TextBlock Text="AlcoRats"
+                               FontSize="36"
+                               FontWeight="SemiBold"
+                               HorizontalAlignment="Center"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+
+                    <Button x:Name="GoLiveButton"
+                            Width="148"
+                            Height="148"
+                            Padding="0"
+                            HorizontalAlignment="Center"
+                            CornerRadius="74"
+                            Background="{DynamicResource GoLiveButtonBrush}"
+                            BorderThickness="0"
+                            Foreground="White"
+                            FontSize="22"
+                            FontWeight="Bold"
+                            Click="OnGoLiveClick">
+                        <StackPanel Spacing="4" HorizontalAlignment="Center">
+                            <materialIcons:MaterialIcon Kind="Broadcast"
+                                                        Width="36"
+                                                        Height="36"
+                                                        Foreground="White"
+                                                        HorizontalAlignment="Center" />
+                            <TextBlock Text="GoLive"
+                                       FontSize="20"
+                                       FontWeight="Bold"
+                                       Foreground="White"
+                                       HorizontalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+
+                    <TextBlock Text="Нажмите, чтобы войти в комнату"
+                               Opacity="0.55"
+                               FontSize="14"
+                               HorizontalAlignment="Center"
+                               Foreground="{DynamicResource StatusBarForegroundBrush}" />
+                </StackPanel>
+
+                <TextBlock Grid.Row="2"
+                           Margin="16,0,16,24"
+                           Opacity="0.35"
+                           FontSize="12"
+                           HorizontalAlignment="Center"
+                           Text="Домашний экран · WebView выключен"
+                           Foreground="{DynamicResource StatusBarForegroundBrush}" />
+            </Grid>
+        </Border>
 
         <Border x:Name="SettingsOverlay"
                 IsVisible="False"

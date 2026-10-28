@@ -5,7 +5,7 @@ namespace AlcoRats.Bot;
 
 public class Configuration
 {
-    public string Token { get; set; } = "8886065444:AAG3j0TdDYv7Yn8yy5k-B9hk-gxKPVFatdk";
+    public string Token { get; set; } = "";
 
     public string TelegramBotName { get; set; } = "@alcoratsbot";
 
@@ -17,7 +17,7 @@ public class Configuration
 
     public string JitsiUserPassword = "Mi6Ohz8joech";
 
-    public string Gravatar = "";
+    public string Gravatar = "bot.alcoholic@gmail.com";
 
     public string BotName = "[BOT] Ceiling Cat";
 
@@ -37,6 +37,27 @@ public class Configuration
     public int JitsiRemoteDebuggingPort { get; set; } = 9333;
 
     public bool JitsiHeadless { get; set; } = true;
+
+    /// <summary>
+    /// Piper voice id: dmitri | irina | denis | ruslan. Default: dmitri (bundled archive in Speech/).
+    /// </summary>
+    public string PiperVoice { get; set; } = "dmitri";
+
+    /// <summary>
+    /// Directory for Piper extract cache and temp WAVs.
+    /// Empty = <c>AppContext.BaseDirectory/Speech</c> when present, else LocalAppData.
+    /// </summary>
+    public string PiperCacheDir { get; set; } = "";
+
+    /// <summary>
+    /// Gemini Developer API key (AI Studio). Prefer env <c>GEMINI_API_KEY</c> in production.
+    /// </summary>
+    public string GeminiApiKey { get; set; } = "";
+
+    /// <summary>
+    /// Gemini model id for the free Developer API. Default: gemini-flash-latest.
+    /// </summary>
+    public string GeminiModel { get; set; } = "gemini-flash-latest";
 
     public static Configuration Instance { get; private set; } = null!;
 
@@ -87,5 +108,16 @@ public class Configuration
             config.JitsiUserPassword = Env("JitsiUserPassword");
         if (!string.IsNullOrWhiteSpace(Env("BotName")))
             config.BotName = Env("BotName");
+        if (!string.IsNullOrWhiteSpace(Env("PiperVoice")))
+            config.PiperVoice = Env("PiperVoice");
+        if (!string.IsNullOrWhiteSpace(Env("PiperCacheDir")))
+            config.PiperCacheDir = Env("PiperCacheDir");
+        var geminiKey = Env("GeminiApiKey");
+        if (string.IsNullOrWhiteSpace(geminiKey))
+            geminiKey = Env("GEMINI_API_KEY");
+        if (!string.IsNullOrWhiteSpace(geminiKey))
+            config.GeminiApiKey = geminiKey;
+        if (!string.IsNullOrWhiteSpace(Env("GeminiModel")))
+            config.GeminiModel = Env("GeminiModel");
     }
 }

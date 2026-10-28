@@ -14,8 +14,10 @@ class CommandProcessor : ICommandProcessor
     private readonly ILogger<CommandProcessor> _logger;
     private readonly IClientProvider _clientProvider;
 
+    private readonly IAIChat _aIChat;
 
-    public CommandProcessor(IJitsiBotService jitsiBot, Configuration configuration, ILogger<CommandProcessor> logger, IDatabase database, IClientProvider clientProvider)
+
+    public CommandProcessor(IJitsiBotService jitsiBot, Configuration configuration, ILogger<CommandProcessor> logger, IDatabase database, IClientProvider clientProvider, IAIChat aIChat)
     {
         _logger = logger;
         _jitsiBot = jitsiBot;
@@ -26,6 +28,7 @@ class CommandProcessor : ICommandProcessor
         _jitsiBot.ChatMessageReceived += OnJitsiChatMessageReceived;
         _jitsiBot.UserConnected += OnJitsiUserConnected;
         _jitsiBot.UserDisconnected += OnJitsiUserDisconnected;
+        _aIChat = aIChat;
     }
 
     private async void OnJitsiChatMessageReceived(object sender, ChatMessage message)
@@ -171,8 +174,18 @@ class CommandProcessor : ICommandProcessor
                 break;
 
             case CommandKind.Message:
-                await _jitsiBot.SendMessage($"[{command.UserName}]: {(command.Arguments.FirstOrDefault() ?? string.Empty)}");
+                var text = command.Arguments.FirstOrDefault();
+                if (!string.IsNullOrEmpty(text))
+                {
+                    await _jitsiBot.SendMessage($"[{command.UserName}]: {text}");
+                    await _jitsiBot.SpeakAsync(await AIChat(command.UserName, text));
+                }
                 break;
         }
+    }
+
+    private async Task<string> AIChat(string name, string message)
+    {
+        return await _aIChat.Query($"Отвечай кратко, если не попросят иначе. На следущей строке обращение участника конференции: {name}\r\n{message}");
     }
 }

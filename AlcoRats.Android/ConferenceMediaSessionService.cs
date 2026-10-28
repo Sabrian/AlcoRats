@@ -26,12 +26,16 @@ namespace AlcoRats.Android;
 
 [Service(
     Name = "com.alcorats.app.ConferenceMediaSessionService",
-    Exported = true,
+    Exported = false,
+    // media+mic FGS; Telecom ConnectionService covers "phone call" keep-alive separately
+    // (TypePhoneCall would race PlaceCall and can SecurityException before Connection is Active).
+    // stopWithTask=false is set in AndroidManifest.xml (ServiceAttribute has no StopWithTask).
     ForegroundServiceType = ForegroundService.TypeMediaPlayback | ForegroundService.TypeMicrophone)]
 [IntentFilter([Intent.ActionMediaButton, ActionToggleMic, ActionToggleCam, ActionOpenChat, ActionLeave, ActionRefresh])]
 public sealed class ConferenceMediaSessionService : Service
 {
-    public const string ChannelId = "alcorats_conference_hotkeys";
+    /// <summary>High-importance call channel (Default channel kept for older installs).</summary>
+    public const string ChannelId = "alcorats_conference_call";
     public const int NotificationId = 4201;
 
     public const string ActionToggleMic = "com.alcorats.app.ACTION_TOGGLE_MIC";
@@ -54,9 +58,13 @@ public sealed class ConferenceMediaSessionService : Service
     private bool _camPending;
     private bool _audioMutedWhenMicPending;
     private bool _videoMutedWhenCamPending;
-    /// <summary>Unread already present while history is still catching up after join — no tones yet.</summary>
+    /// <summary>Max unread seen while history catches up after join — tones only above this.</summary>
     private int _unreadChatJoinFloor;
     private bool _chatToneBaselineReady;
+    private int _chatJoinStableTicks;
+    private DateTime _chatJoinGraceStartedUtc = DateTime.MinValue;
+    private const int ChatJoinStableTicksRequired = 4;
+    private static readonly TimeSpan ChatJoinGrace = TimeSpan.FromSeconds(12);
     private static readonly object ToneLock = new();
     private Java.Lang.IRunnable? _clearMicPendingRunnable;
     private Java.Lang.IRunnable? _clearCamPendingRunnable;
@@ -144,11 +152,13 @@ public sealed class ConferenceMediaSessionService : Service
         {
             // StartForegroundService requires a brief StartForeground — then tear down.
             EnsureForegroundStartedForCompliance();
+            ReleaseKeepAlive();
             DismissShade();
             StopSelf(startId);
             return StartCommandResult.NotSticky;
         }
 
+        AcquireKeepAlive(state);
         PublishForeground(state);
         if (_session is not null)
             _session.Active = true;
@@ -161,6 +171,7 @@ public sealed class ConferenceMediaSessionService : Service
         if (_conference is not null)
             _conference.StateChanged -= OnConferenceStateChanged;
         ClearPending(mic: true, cam: true);
+        ReleaseKeepAlive();
 
         if (_session is not null)
         {
@@ -172,6 +183,18 @@ public sealed class ConferenceMediaSessionService : Service
 
         _callback = null;
         base.OnDestroy();
+    }
+
+    private void AcquireKeepAlive(ConferenceSessionState state)
+    {
+        ConferenceWakeLock.Acquire(this);
+        ConferenceTelecom.SyncWithConference(this, state);
+    }
+
+    private void ReleaseKeepAlive()
+    {
+        ConferenceTelecom.SyncWithConference(this, ConferenceSessionState.Inactive);
+        ConferenceWakeLock.Release();
     }
 
     private void OnConferenceStateChanged(ConferenceSessionState state)
@@ -195,8 +218,9 @@ public sealed class ConferenceMediaSessionService : Service
     }
 
     /// <summary>
-    /// While joining, unread often climbs 0→1→2… as history loads. Raise a floor until the
-    /// count stops growing — no timer, only “still catching up” vs “stable”.
+    /// After join, Jitsi history / unread often spikes for several seconds. Arm tones only
+    /// after a grace period AND several consecutive stable unread snapshots; then require
+    /// unread to exceed the join floor (not just the previous tick).
     /// </summary>
     private void UpdateChatJoinBaseline(ConferenceSessionState state)
     {
@@ -204,27 +228,48 @@ public sealed class ConferenceMediaSessionService : Service
         {
             _unreadChatJoinFloor = 0;
             _chatToneBaselineReady = false;
+            _chatJoinStableTicks = 0;
+            _chatJoinGraceStartedUtc = DateTime.MinValue;
             return;
         }
 
         if (!_lastState.IsActive)
         {
-            _unreadChatJoinFloor = state.UnreadChatCount;
+            _unreadChatJoinFloor = Math.Max(0, state.UnreadChatCount);
             _chatToneBaselineReady = false;
-            return;
-        }
-
-        if (_chatToneBaselineReady)
-        {
-            if (state.UnreadChatCount < _lastState.UnreadChatCount)
-                _unreadChatJoinFloor = 0;
+            _chatJoinStableTicks = 0;
+            _chatJoinGraceStartedUtc = DateTime.UtcNow;
             return;
         }
 
         if (state.UnreadChatCount > _unreadChatJoinFloor)
+        {
+            // History still loading (or real messages during grace) — raise floor, stay muted.
             _unreadChatJoinFloor = state.UnreadChatCount;
-        else
+            _chatJoinStableTicks = 0;
+            _chatToneBaselineReady = false;
+            return;
+        }
+
+        if (state.UnreadChatCount < _lastState.UnreadChatCount)
+        {
+            // User opened chat / unread cleared — adopt new floor; keep tones armed if already ready.
+            _unreadChatJoinFloor = Math.Max(0, state.UnreadChatCount);
+            _chatJoinStableTicks = 0;
+            return;
+        }
+
+        if (_chatToneBaselineReady)
+            return;
+
+        _chatJoinStableTicks++;
+        var graceDone = _chatJoinGraceStartedUtc != DateTime.MinValue
+                        && DateTime.UtcNow - _chatJoinGraceStartedUtc >= ChatJoinGrace;
+        if (graceDone && _chatJoinStableTicks >= ChatJoinStableTicksRequired)
+        {
             _chatToneBaselineReady = true;
+            _unreadChatJoinFloor = Math.Max(_unreadChatJoinFloor, state.UnreadChatCount);
+        }
     }
 
     private bool ShouldPlayIncomingMessageTone(ConferenceSessionState state)
@@ -232,7 +277,9 @@ public sealed class ConferenceMediaSessionService : Service
         if (!state.IsActive || !_lastState.IsActive || !_chatToneBaselineReady)
             return false;
 
-        return state.UnreadChatCount > _lastState.UnreadChatCount;
+        // Must be a real increase past both the previous tick and the post-join floor.
+        return state.UnreadChatCount > _lastState.UnreadChatCount
+               && state.UnreadChatCount > _unreadChatJoinFloor;
     }
 
     private static IConferenceSession? ResolveConferenceSession()
@@ -385,10 +432,12 @@ public sealed class ConferenceMediaSessionService : Service
     {
         if (!state.IsActive)
         {
+            ReleaseKeepAlive();
             DismissShade();
             return;
         }
 
+        AcquireKeepAlive(state);
         var notification = BuildNotification(state);
         StartForegroundWith(notification);
         NotificationManagerCompat.From(this)?.Notify(NotificationId, notification);
@@ -503,11 +552,13 @@ public sealed class ConferenceMediaSessionService : Service
 
         var channel = new NotificationChannel(
             ChannelId,
-            "Конференция",
-            NotificationImportance.Default)
+            "Конференция (звонок)",
+            NotificationImportance.High)
         {
-            Description = "Панель конференции: участники, микрофон, камера, чат, выход. Play/Pause — mute."
+            Description = "Идёт конференция — не останавливать. Участники, микрофон, камера, чат, выход."
         };
+        channel.SetShowBadge(false);
+        channel.LockscreenVisibility = NotificationVisibility.Public;
         manager?.CreateNotificationChannel(channel);
     }
 
@@ -521,6 +572,8 @@ public sealed class ConferenceMediaSessionService : Service
             launchIntent,
             PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable);
 
+        var hangupIntent = CreateActionPendingIntent(ActionLeave, requestCode: 44);
+
         var icon = ApplicationInfo?.Icon ?? global::Android.Resource.Drawable.IcMediaPlay;
         var builder = new NotificationCompat.Builder(this, ChannelId)!
             .SetSmallIcon(icon)!
@@ -529,11 +582,32 @@ public sealed class ConferenceMediaSessionService : Service
             .SetOnlyAlertOnce(true)!
             .SetCategory(NotificationCompat.CategoryCall)!
             .SetVisibility(NotificationCompat.VisibilityPublic)!
-            .SetPriority((int)NotificationPriority.Default)!;
+            .SetPriority((int)NotificationPriority.Max)!;
 
         var names = string.Join(", ", state.Participants.Take(CollapsedParticipantSlots).Select(p => p.Name));
         if (string.IsNullOrWhiteSpace(names))
             names = "Вы в конференции";
+
+        // API 31+: CallStyle ranks as an ongoing call (stronger against OEM kills).
+        // Custom RemoteViews are incompatible with CallStyle — use them below S.
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
+        {
+            var person = new AndroidX.Core.App.Person.Builder()
+                .SetName("AlcoRats")!
+                .SetImportant(true)!
+                .Build()!;
+            var callStyle = NotificationCompat.CallStyle.ForOngoingCall(person, hangupIntent)!;
+            return builder
+                .SetContentTitle("Конференция")!
+                .SetContentText(names)!
+                .SetStyle(callStyle)!
+                .AddPerson(person)!
+                .AddAction(new NotificationCompat.Action(
+                    state.AudioMuted ? Resource.Drawable.ic_mic_off : Resource.Drawable.ic_mic,
+                    state.AudioMuted ? "Микрофон" : "Выкл. микрофон",
+                    CreateActionPendingIntent(ActionToggleMic, 41)))!
+                .Build()!;
+        }
 
         var collapsed = new RemoteViews(PackageName, Resource.Layout.notification_conference);
         BindConferenceRemoteViews(collapsed, state, expanded: false);
@@ -678,12 +752,12 @@ public sealed class ConferenceMediaSessionService : Service
         {
             try
             {
-                // Ascending when enabling mic, descending when muting.
-                var firstHz = microphoneOn ? 740.0 : 987.0;
-                var secondHz = microphoneOn ? 987.0 : 740.0;
-                PlayTone(firstHz, 70);
-                Thread.Sleep(40);
-                PlayTone(secondHz, 95);
+                // Octave leap — on/off pairs are clearly distinct (was a tight major third).
+                var firstHz = microphoneOn ? 523.25 : 1046.50; // C5 → C6 up, C6 → C5 down
+                var secondHz = microphoneOn ? 1046.50 : 523.25;
+                PlayTone(firstHz, 85);
+                Thread.Sleep(55);
+                PlayTone(secondHz, 110);
             }
             catch
             {

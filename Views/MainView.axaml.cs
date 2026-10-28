@@ -35,10 +35,13 @@ public partial class MainView : UserControl
     private bool _navigationStarted;
     private bool _bridgeInstalled;
     private bool _conferenceActive;
+    private bool _onHomeScreen = true;
+    /// <summary>One-shot: allow JS welcome→room redirect only right after GoLive, not after hangup.</summary>
+    private bool _allowWelcomeRoomRedirect;
     private bool _settingsOpen;
     private bool _settingsAnimating;
     private readonly TranslateTransform _settingsTransform = new();
-    private NativeWebView RoomWebView = null!;
+    private NativeWebView? RoomWebView;
 
     /// <summary>Last DOM snapshot from <see cref="GetDomModel"/> (debugger / logcat).</summary>
     public string LastDomModel { get; private set; } = string.Empty;
@@ -105,6 +108,10 @@ public partial class MainView : UserControl
           }
           publishInactive();
           try {
+            if (typeof window.__alcoRatsReleaseLocalMedia === 'function')
+              window.__alcoRatsReleaseLocalMedia();
+          } catch (eRel) {}
+          try {
             if (typeof APP !== 'undefined' && APP.conference && typeof APP.conference.hangup === 'function') {
               // false = skip feedback prompt when supported (avoids sticky leftover UI).
               try { APP.conference.hangup(false); } catch (e1) { APP.conference.hangup(); }
@@ -122,6 +129,89 @@ public partial class MainView : UserControl
             }
           } catch (e) {}
           return 'fail';
+        })()
+        """;
+
+    /// <summary>
+    /// Stops prejoin/call getUserMedia tracks. Hangup alone often leaves camera LED + headset
+    /// open on the connection screen; disposing the WebView without this keeps them live.
+    /// </summary>
+    private const string ReleaseLocalMediaScript = """
+        (function () {
+          function stopStream(stream) {
+            try {
+              if (!stream || typeof stream.getTracks !== 'function') return;
+              stream.getTracks().forEach(function (t) {
+                try { t.stop(); } catch (e) {}
+              });
+            } catch (e) {}
+          }
+
+          function disposeJitsiTrack(t) {
+            try {
+              if (!t) return;
+              if (typeof t.dispose === 'function') { t.dispose(); return; }
+              if (t.track && typeof t.track.stop === 'function') t.track.stop();
+              if (typeof t.getTrack === 'function') {
+                var mt = t.getTrack();
+                if (mt && typeof mt.stop === 'function') mt.stop();
+              }
+            } catch (e) {}
+          }
+
+          try {
+            if (typeof APP !== 'undefined' && APP.conference) {
+              try {
+                if (typeof APP.conference.muteAudio === 'function')
+                  APP.conference.muteAudio(true);
+              } catch (eA) {}
+              try {
+                if (typeof APP.conference.muteVideo === 'function')
+                  APP.conference.muteVideo(true);
+              } catch (eV) {}
+              try {
+                if (typeof APP.conference.getLocalTracks === 'function') {
+                  var local = APP.conference.getLocalTracks() || [];
+                  for (var i = 0; i < local.length; i++)
+                    disposeJitsiTrack(local[i]);
+                }
+              } catch (eT) {}
+            }
+          } catch (eConf) {}
+
+          try {
+            if (typeof APP !== 'undefined' && APP.store && typeof APP.store.getState === 'function') {
+              var tracks = APP.store.getState()['features/base/tracks'] || [];
+              if (tracks && typeof tracks.forEach === 'function') {
+                tracks.forEach(function (tr) {
+                  try {
+                    if (tr && tr.local)
+                      disposeJitsiTrack(tr.jitsiTrack || tr);
+                  } catch (e1) {}
+                });
+              }
+            }
+          } catch (eStore) {}
+
+          try {
+            document.querySelectorAll('video, audio').forEach(function (el) {
+              try {
+                stopStream(el.srcObject);
+                el.srcObject = null;
+                el.removeAttribute('src');
+                if (typeof el.load === 'function') el.load();
+              } catch (eEl) {}
+            });
+          } catch (eDom) {}
+
+          try {
+            if (window.__alcoRatsGumStreams && window.__alcoRatsGumStreams.length) {
+              window.__alcoRatsGumStreams.forEach(stopStream);
+              window.__alcoRatsGumStreams = [];
+            }
+          } catch (eGum) {}
+
+          return 'ok';
         })()
         """;
 
@@ -162,10 +252,12 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 35) {
+          if (window.__alcoRatsBridgeVersion === 38) {
             try {
               if (typeof window.__alcoRatsFillCredentials === 'function')
                 window.__alcoRatsFillCredentials();
+              if (typeof window.__alcoRatsApplyGravatar === 'function')
+                window.__alcoRatsApplyGravatar();
               if (typeof window.__alcoRatsDismissDeepLink === 'function')
                 window.__alcoRatsDismissDeepLink();
               if (typeof window.__alcoRatsEnterHomeFromWelcome === 'function')
@@ -173,7 +265,7 @@ public partial class MainView : UserControl
             } catch (eEx) {}
             return 'exists';
           }
-          window.__alcoRatsBridgeVersion = 35;
+          window.__alcoRatsBridgeVersion = 38;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           if (window.__alcoRatsUiFixTimer) {
@@ -1053,6 +1145,8 @@ public partial class MainView : UserControl
 
           function enterHomeRoomFromWelcome() {
             try {
+              // Only after GoLive — hangup lands on Jitsi welcome; must not re-enter the room.
+              if (!window.__alcoRatsAllowWelcomeRedirect) return;
               if (window.__alcoRatsRedirectingHome) return;
               if (!isJitsiWelcomePage()) return;
 
@@ -1061,24 +1155,132 @@ public partial class MainView : UserControl
               if (!homeUrl && !roomName) return;
 
               window.__alcoRatsRedirectingHome = true;
+              window.__alcoRatsAllowWelcomeRedirect = false;
               if (homeUrl) {
                 try {
                   location.replace(homeUrl);
                   return;
                 } catch (eNav) {}
               }
-              if (!trySubmitWelcomeWithRoomName(roomName))
+              if (!trySubmitWelcomeWithRoomName(roomName)) {
                 window.__alcoRatsRedirectingHome = false;
+                window.__alcoRatsAllowWelcomeRedirect = true;
+              }
             } catch (e) {
               window.__alcoRatsRedirectingHome = false;
             }
           }
 
+          function applyGravatarProfile() {
+            try {
+              var email = window.__alcoRatsEmail || '';
+              var avatarUrl = window.__alcoRatsAvatarUrl || '';
+              var name = window.__alcoRatsUser || '';
+              if (!email && !avatarUrl) return;
+              try {
+                if (email) localStorage.setItem('email', email);
+                if (avatarUrl) localStorage.setItem('avatarURL', avatarUrl);
+                var settingsRaw = localStorage.getItem('features/base/settings');
+                var settings = settingsRaw ? JSON.parse(settingsRaw) : {};
+                if (!settings || typeof settings !== 'object') settings = {};
+                if (name) settings.displayName = name;
+                if (email) settings.email = email;
+                if (avatarUrl) settings.avatarURL = avatarUrl;
+                localStorage.setItem('features/base/settings', JSON.stringify(settings));
+              } catch (eLs) {}
+              if (typeof APP === 'undefined') return;
+              try {
+                if (APP.conference) {
+                  if (avatarUrl && typeof APP.conference.changeLocalAvatarUrl === 'function')
+                    APP.conference.changeLocalAvatarUrl(avatarUrl);
+                  if (APP.conference._room
+                      && typeof APP.conference._room.setLocalParticipantProperty === 'function') {
+                    if (email) APP.conference._room.setLocalParticipantProperty('email', email);
+                    if (avatarUrl) APP.conference._room.setLocalParticipantProperty('avatar-url', avatarUrl);
+                  }
+                }
+              } catch (eConf) {}
+              try {
+                if (APP.store && typeof APP.store.dispatch === 'function') {
+                  APP.store.dispatch({
+                    type: 'SETTINGS_UPDATED',
+                    settings: {
+                      displayName: name || undefined,
+                      email: email || undefined,
+                      avatarURL: avatarUrl || undefined
+                    }
+                  });
+                  APP.store.dispatch({
+                    type: 'UPDATE_SETTINGS',
+                    settings: {
+                      displayName: name || undefined,
+                      email: email || undefined,
+                      avatarURL: avatarUrl || undefined
+                    }
+                  });
+                }
+              } catch (eStore) {}
+            } catch (e) {}
+          }
+
           window.__alcoRatsPublishConference = publish;
           window.__alcoRatsFillRoomPassword = fillRoomPasswordIfNeeded;
           window.__alcoRatsFillCredentials = fillCredentialsIfNeeded;
+          window.__alcoRatsApplyGravatar = applyGravatarProfile;
           window.__alcoRatsDismissDeepLink = dismissDeepLinkingPrompt;
           window.__alcoRatsEnterHomeFromWelcome = enterHomeRoomFromWelcome;
+
+          // Remember getUserMedia streams so Home can stop prejoin cam/mic LEDs.
+          try {
+            if (!window.__alcoRatsGumHooked && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+              window.__alcoRatsGumHooked = true;
+              window.__alcoRatsGumStreams = window.__alcoRatsGumStreams || [];
+              var origGum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+              navigator.mediaDevices.getUserMedia = function (constraints) {
+                return origGum(constraints).then(function (stream) {
+                  try { window.__alcoRatsGumStreams.push(stream); } catch (ePush) {}
+                  return stream;
+                });
+              };
+            }
+          } catch (eHook) {}
+
+          window.__alcoRatsReleaseLocalMedia = function () {
+            try {
+              function stopStream(stream) {
+                try {
+                  if (!stream || typeof stream.getTracks !== 'function') return;
+                  stream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+                } catch (e) {}
+              }
+              function disposeJitsiTrack(t) {
+                try {
+                  if (!t) return;
+                  if (typeof t.dispose === 'function') { t.dispose(); return; }
+                  if (t.track && typeof t.track.stop === 'function') t.track.stop();
+                } catch (e) {}
+              }
+              try {
+                if (APP && APP.conference) {
+                  try { if (APP.conference.muteAudio) APP.conference.muteAudio(true); } catch (eA) {}
+                  try { if (APP.conference.muteVideo) APP.conference.muteVideo(true); } catch (eV) {}
+                  try {
+                    var local = APP.conference.getLocalTracks && APP.conference.getLocalTracks() || [];
+                    for (var i = 0; i < local.length; i++) disposeJitsiTrack(local[i]);
+                  } catch (eT) {}
+                }
+              } catch (eConf) {}
+              try {
+                document.querySelectorAll('video, audio').forEach(function (el) {
+                  try { stopStream(el.srcObject); el.srcObject = null; } catch (eEl) {}
+                });
+              } catch (eDom) {}
+              try {
+                (window.__alcoRatsGumStreams || []).forEach(stopStream);
+                window.__alcoRatsGumStreams = [];
+              } catch (eGum) {}
+            } catch (eRel) {}
+          };
 
           // Debounced credential/welcome pass — raw MutationObserver + body.innerText
           // on every React paint freezes the prejoin WebView («Настраиваются устройства…»).
@@ -1089,6 +1291,7 @@ public partial class MainView : UserControl
               window.__alcoRatsDomPassScheduled = false;
               try {
                 fillCredentialsIfNeeded();
+                applyGravatarProfile();
                 dismissDeepLinkingPrompt();
                 enterHomeRoomFromWelcome();
               } catch (ePass) {}
@@ -1133,8 +1336,6 @@ public partial class MainView : UserControl
         _leaveHandler = LeaveAndResetAsync;
         _openChatHandler = () => RunScriptAsync(OpenChatScript);
 
-        WireRoomWebView();
-
         AttachedToVisualTree += OnAttachedToVisualTree;
         DetachedFromVisualTree += OnDetachedFromVisualTree;
         _logger.LogDebug("MainView created");
@@ -1144,7 +1345,15 @@ public partial class MainView : UserControl
     {
         InitializeComponent();
         SettingsOverlay.RenderTransform = _settingsTransform;
-        EnsureRoomWebView();
+        // WebView is created only on GoLive — keeps home screen idle for battery.
+        // Do not touch _conference here (: this() runs before DI fields are assigned).
+        if (!Design.IsDesignMode)
+        {
+            _onHomeScreen = true;
+            HomeOverlay.IsVisible = true;
+            HomeOverlay.IsHitTestVisible = true;
+            ConferencePane.IsVisible = false;
+        }
     }
 
     private void EnsureRoomWebView()
@@ -1152,7 +1361,11 @@ public partial class MainView : UserControl
         if (Design.IsDesignMode)
             return;
 
+        if (RoomWebView is not null)
+            return;
+
         CreateRoomWebViewInstance();
+        WireRoomWebView();
     }
 
     private void CreateRoomWebViewInstance()
@@ -1190,10 +1403,10 @@ public partial class MainView : UserControl
     }
 
     /// <summary>
-    /// Drops the native WebView so Jitsi SPA / media from a previous session cannot linger.
-    /// Same-URL Navigate alone often leaves post-hangup UI and skips a real reconnect.
+    /// Drops the native WebView so Jitsi SPA / media / bridge timers cannot linger.
+    /// Used when returning to the Avalonia home screen (battery-friendly idle).
     /// </summary>
-    private void RecreateRoomWebViewAndNavigateHome()
+    private void DisposeRoomWebView()
     {
         if (Design.IsDesignMode)
             return;
@@ -1210,34 +1423,102 @@ public partial class MainView : UserControl
             _logger.LogDebug(ex, "Previous WebView dispose failed");
         }
 
+        RoomWebView = null;
         WebViewHost.Children.Clear();
         _bridgeInstalled = false;
         _pageReady = false;
+        _navigationStarted = false;
+    }
 
-        CreateRoomWebViewInstance();
-        WireRoomWebView();
-
-        var url = WithHashParams(ResolveRoomUrl(), ("alcoRatsReset", Guid.NewGuid().ToString("N")[..8]));
-        SetStatus("Открытие страницы подключения…");
-        _logger.LogInformation("Recreated WebView and navigating to {Url}", url);
+    /// <summary>
+    /// Stop cam/mic tracks (esp. prejoin preview), blank the page, then dispose WebView.
+    /// </summary>
+    private async Task ReleaseMediaAndDisposeWebViewAsync()
+    {
+        var webView = RoomWebView;
+        if (webView is null)
+            return;
 
         try
         {
-            RoomWebView.Source = url;
-            RoomWebView.Navigate(url);
+            await RunScriptAsync(ReleaseLocalMediaScript).ConfigureAwait(false);
+            // Chromium often keeps capture alive until the document is torn down.
+            await InvokeScriptBoundedAsync(
+                    "(function(){try{location.replace('about:blank');}catch(e){}return 'ok';})()",
+                    timeoutMs: 1500)
+                .ConfigureAwait(false);
+            await Task.Delay(80).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Navigate after WebView recreate failed");
-            SetStatus("Ошибка: " + ex.Message);
+            _logger.LogDebug(ex, "Release local media before home failed");
         }
+
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            // GoLive may have created a new WebView while we were releasing.
+            if (!ReferenceEquals(RoomWebView, webView))
+                return;
+            DisposeRoomWebView();
+        });
+    }
+
+    private void ShowHomeScreen(bool disposeWebView = true)
+    {
+        void Apply()
+        {
+            _onHomeScreen = true;
+            _conferenceActive = false;
+            _allowWelcomeRoomRedirect = false;
+            _conference.Publish(ConferenceSessionState.Inactive);
+
+            HomeOverlay.IsVisible = true;
+            HomeOverlay.IsHitTestVisible = true;
+            ConferencePane.IsVisible = false;
+            SetStatus("Домашний экран");
+            _logger.LogInformation("Home screen shown (WebView disposed={Disposed})", disposeWebView);
+
+            if (disposeWebView)
+            {
+                if (RoomWebView is not null)
+                    _ = ReleaseMediaAndDisposeWebViewAsync();
+                else
+                    DisposeRoomWebView();
+            }
+        }
+
+        if (Dispatcher.UIThread.CheckAccess())
+            Apply();
+        else
+            Dispatcher.UIThread.Post(Apply);
+    }
+
+    private void EnterConferenceRoom()
+    {
+        if (Design.IsDesignMode)
+            return;
+
+        _onHomeScreen = false;
+        _allowWelcomeRoomRedirect = true;
+        HomeOverlay.IsVisible = false;
+        HomeOverlay.IsHitTestVisible = false;
+        ConferencePane.IsVisible = true;
+        StatusPanel.IsVisible = true;
+        ConferenceActionButton.IsVisible = true;
+
+        EnsureRoomWebView();
+        _navigationStarted = false;
+        StartNavigation();
+        _ = WatchdogAsync();
+        _logger.LogInformation("GoLive — entering conference room");
     }
 
     private async Task LeaveAndResetAsync()
     {
         try
         {
-            await RunScriptAsync(LeaveScript);
+            if (RoomWebView is not null)
+                await RunScriptAsync(LeaveScript);
         }
         catch (Exception ex)
         {
@@ -1246,14 +1527,31 @@ public partial class MainView : UserControl
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
-            _conference.Publish(ConferenceSessionState.Inactive);
             UpdateConferenceActionButton(false);
-            RecreateRoomWebViewAndNavigateHome();
+            ShowHomeScreen(disposeWebView: true);
         });
     }
 
     private void OnAdapterCreated(object sender, EventArgs e)
-        => WebViewPlatformSetup.Apply(RoomWebView);
+    {
+        if (RoomWebView is not null)
+            WebViewPlatformSetup.Apply(RoomWebView);
+    }
+
+    private void OnGoLiveClick(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_settingsOpen || _settingsAnimating)
+                return;
+            EnterConferenceRoom();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GoLive failed");
+            SetStatus("Ошибка: " + ex.Message);
+        }
+    }
 
     private void OnAttachedToVisualTree(object sender, VisualTreeAttachmentEventArgs e)
     {
@@ -1264,9 +1562,9 @@ public partial class MainView : UserControl
             _openChatHandler);
         _conference.StateChanged += OnConferenceSessionStateChanged;
         UpdateConferenceActionButton(_conference.State.IsActive);
-        WebViewPlatformSetup.Apply(RoomWebView);
-        StartNavigation();
-        _ = WatchdogAsync();
+        // Stay on lightweight home until GoLive — do not create/navigate WebView here.
+        if (_onHomeScreen)
+            ShowHomeScreen(disposeWebView: false);
     }
 
     private void OnDetachedFromVisualTree(object sender, VisualTreeAttachmentEventArgs e)
@@ -1288,9 +1586,10 @@ public partial class MainView : UserControl
         void Apply()
         {
             _conferenceActive = active;
+            if (_onHomeScreen)
+                return;
+
             // Hang up is done from Jitsi toolbar; hide the whole status bar while in call.
-            // Collapsing the Auto row shrinks WebViewHost so NativeWebView cannot cover the bar
-            // when it is shown again (prejoin / welcome).
             StatusPanel.IsVisible = !active;
             ConferenceActionButton.IsVisible = !active;
         }
@@ -1308,7 +1607,8 @@ public partial class MainView : UserControl
             if (_conferenceActive)
                 return;
 
-            NavigateToRoomHome();
+            // Home button → Avalonia home (dispose WebView), not Jitsi prejoin again.
+            ShowHomeScreen(disposeWebView: true);
         }
         catch (Exception ex)
         {
@@ -1354,7 +1654,8 @@ public partial class MainView : UserControl
             SettingsPage.DataContext = new SettingsViewModel(_settings);
 
             // Native WebView sits above Avalonia and can steal IME focus on Android.
-            SetWebViewActive(false);
+            if (!_onHomeScreen)
+                SetWebViewActive(false);
 
             var width = Bounds.Width;
             if (width <= 0)
@@ -1397,9 +1698,13 @@ public partial class MainView : UserControl
             SettingsOverlay.IsHitTestVisible = false;
             SettingsOverlay.IsVisible = false;
             _settingsTransform.X = 0;
-            SetWebViewActive(true);
+            if (!_onHomeScreen)
+            {
+                SetWebViewActive(true);
+                await PushRoomPasswordAsync();
+            }
+
             _settingsOpen = false;
-            await PushRoomPasswordAsync();
         }
         finally
         {
@@ -1409,6 +1714,9 @@ public partial class MainView : UserControl
 
     private void SetWebViewActive(bool active)
     {
+        if (RoomWebView is null)
+            return;
+
         RoomWebView.IsVisible = active;
         RoomWebView.IsEnabled = active;
         RoomWebView.IsHitTestVisible = active;
@@ -1441,15 +1749,12 @@ public partial class MainView : UserControl
         await Task.Delay(280);
     }
 
-    private void NavigateToRoomHome()
-        => RecreateRoomWebViewAndNavigateHome();
-
     private void StartNavigation()
     {
-        if (_navigationStarted)
+        if (_navigationStarted || RoomWebView is null)
             return;
 
-        var url = ResolveRoomUrl();
+        var url = WithHashParams(ResolveRoomUrl(), ("alcoRatsReset", Guid.NewGuid().ToString("N")[..8]));
         _navigationStarted = true;
         SetStatus("Открытие: " + url.Host + "…");
         _logger.LogInformation("Initial navigation to {Url}", url);
@@ -1503,6 +1808,14 @@ public partial class MainView : UserControl
         {
             var safeName = _settings.User.Trim().Replace("\"", string.Empty, StringComparison.Ordinal);
             parameters.Add(("userInfo.displayName", "\"" + safeName + "\""));
+        }
+
+        // Email only in the hash — avatar URL contains '&' and would break fragment params.
+        // Avatar is applied via bridge localStorage / Jitsi APIs (see applyGravatarProfile).
+        if (!string.IsNullOrWhiteSpace(_settings.Gravatar))
+        {
+            var safeEmail = _settings.Gravatar.Trim().Replace("\"", string.Empty, StringComparison.Ordinal);
+            parameters.Add(("userInfo.email", "\"" + safeEmail + "\""));
         }
 
         if (_settings.ToolbarAlwaysVisible)
@@ -1613,15 +1926,22 @@ public partial class MainView : UserControl
 
         // Enter-home is deferred with setTimeout so evaluateJavascript can finish;
         // a sync location.replace cancels the JS result callback and hangs await forever.
+        var gravatarEmail = (_settings.Gravatar ?? string.Empty).Trim();
+        var avatarUrl = Gravatar.BuildAvatarUrl(gravatarEmail);
+
         var script =
             "(function(){" +
             $"window.__alcoRatsRoomPassword = {JsonSerializer.Serialize(_settings.RoomPassword ?? string.Empty)};" +
             $"window.__alcoRatsUser = {JsonSerializer.Serialize(_settings.User ?? string.Empty)};" +
             $"window.__alcoRatsUserPassword = {JsonSerializer.Serialize(_settings.Password ?? string.Empty)};" +
+            $"window.__alcoRatsEmail = {JsonSerializer.Serialize(gravatarEmail)};" +
+            $"window.__alcoRatsAvatarUrl = {JsonSerializer.Serialize(avatarUrl)};" +
             $"window.__alcoRatsHomeRoomUrl = {JsonSerializer.Serialize(homeUrl)};" +
             $"window.__alcoRatsHomeRoomName = {JsonSerializer.Serialize(roomName)};" +
+            $"window.__alcoRatsAllowWelcomeRedirect = {(_allowWelcomeRoomRedirect ? "true" : "false")};" +
             "if (typeof window.__alcoRatsFillCredentials === 'function') window.__alcoRatsFillCredentials();" +
             "else if (typeof window.__alcoRatsFillRoomPassword === 'function') window.__alcoRatsFillRoomPassword();" +
+            "if (typeof window.__alcoRatsApplyGravatar === 'function') window.__alcoRatsApplyGravatar();" +
             "if (typeof window.__alcoRatsEnterHomeFromWelcome === 'function')" +
             "  setTimeout(window.__alcoRatsEnterHomeFromWelcome, 0);" +
             "return 'ok';" +
@@ -1869,12 +2189,22 @@ public partial class MainView : UserControl
             // Status + notification panel only while actually in the live call.
             if (!active)
             {
+                // Hangup / kick: leave Avalonia home, do not stay on Jitsi welcome→prejoin.
+                var leftLiveCall = _conference.State.IsActive && !_onHomeScreen;
                 _conference.Publish(ConferenceSessionState.Inactive);
                 UpdateConferenceActionButton(false);
-                SetStatus("Ожидание подключения к конференции…");
+                if (leftLiveCall)
+                {
+                    ShowHomeScreen(disposeWebView: true);
+                    return;
+                }
+
+                if (!_onHomeScreen)
+                    SetStatus("Ожидание подключения к конференции…");
                 return;
             }
 
+            _allowWelcomeRoomRedirect = false;
             _conference.Publish(new ConferenceSessionState(true, audioMuted, videoMuted, participants, Math.Max(0, unreadMessages)));
             UpdateConferenceActionButton(true);
             SetStatus($"Участников: {participants.Count} · сообщений: {unreadMessages}");
@@ -1888,6 +2218,9 @@ public partial class MainView : UserControl
     private async Task WatchdogAsync()
     {
         await Task.Delay(15000);
+        if (_onHomeScreen || RoomWebView is null)
+            return;
+
         if (_pageReady)
         {
             if (!_bridgeInstalled)
@@ -1900,6 +2233,8 @@ public partial class MainView : UserControl
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
+            if (_onHomeScreen || RoomWebView is null)
+                return;
             if (!_pageReady)
                 SetStatus("Ожидание...");
         });

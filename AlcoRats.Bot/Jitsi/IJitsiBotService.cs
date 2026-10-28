@@ -35,4 +35,9 @@ interface IJitsiBotService
     Task StopAsync();
 
     Task SendMessage(string message);
+
+    /// <summary>
+    /// Synthesizes <paramref name="text"/> with Piper (full WAV) and publishes it into the Jitsi room audio.
+    /// </summary>
+    Task SpeakAsync(string text, CancellationToken cancellationToken = default);
 }

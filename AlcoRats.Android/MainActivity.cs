@@ -32,6 +32,9 @@ namespace AlcoRats.Android;
     WindowSoftInputMode = SoftInput.AdjustResize)]
 public class MainActivity : AvaloniaMainActivity
 {
+    /// <summary>Active activity for crash dialogs (singleTop launcher).</summary>
+    public static MainActivity? Current { get; private set; }
+
     private const int MediaPermissionRequestCode = 1001;
     private const int NotificationPermissionRequestCode = 1002;
 
@@ -49,6 +52,7 @@ public class MainActivity : AvaloniaMainActivity
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
+        Current = this;
 
         // Opaque window avoids black/blank frames with Avalonia + native WebView.
         ApplyWindowBackground();
@@ -58,6 +62,13 @@ public class MainActivity : AvaloniaMainActivity
         // and can crash/cancel the first prompt on first launch (esp. Android 13+).
         RequestNextPermission();
         WireConferenceShadeLifecycle();
+    }
+
+    protected override void OnDestroy()
+    {
+        if (ReferenceEquals(Current, this))
+            Current = null;
+        base.OnDestroy();
     }
 
     /// <summary>
@@ -296,6 +307,7 @@ public class MainActivity : AvaloniaMainActivity
             return;
         }
 
+        ConferenceTelecom.EnsureRegistered(this);
         ConferenceMediaSessionService.Start(this);
         _mediaSessionStarted = true;
     }

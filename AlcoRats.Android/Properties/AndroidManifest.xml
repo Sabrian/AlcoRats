@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" android:installLocation="auto">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+		xmlns:tools="http://schemas.android.com/tools"
+		android:installLocation="auto">
 	<uses-permission android:name="android.permission.INTERNET" />
 	<uses-permission android:name="android.permission.CAMERA" />
 	<uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -10,6 +12,8 @@
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 	<uses-permission android:name="android.permission.WAKE_LOCK" />
+	<!-- Self-managed Telecom ConnectionService (VoIP-style keep-alive). -->
+	<uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
 	<uses-feature android:name="android.hardware.camera" android:required="false" />
 	<uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 	<uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -18,6 +22,17 @@
 		android:icon="@drawable/Icon"
 		android:usesCleartextTraffic="false"
 		android:hardwareAccelerated="true">
+		<!--
+		  Explicit FGS types required on Android 14+: StartForeground(media|mic = 0x82)
+		  must be a subset of this attribute. Merging stopWithTask alone previously left type=0.
+		-->
+		<service
+			android:name="com.alcorats.app.ConferenceMediaSessionService"
+			android:exported="false"
+			android:stopWithTask="false"
+			android:foregroundServiceType="mediaPlayback|microphone"
+			tools:node="merge"
+			tools:replace="android:foregroundServiceType,android:stopWithTask,android:exported" />
 		<receiver
 			android:name="androidx.media.session.MediaButtonReceiver"
 			android:exported="true">

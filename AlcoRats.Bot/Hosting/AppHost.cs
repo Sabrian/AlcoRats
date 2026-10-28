@@ -56,6 +56,10 @@ public static class AppHost
         });
 
         services.AddSingleton(Configuration.Instance);
+        if (Configuration.Instance.SaveDomSnapshots)
+            services.AddSingleton<IDomSnapshotStore, DomSnapshotStore>();
+        else
+            services.AddSingleton<IDomSnapshotStore, NullDomSnapshotStore>();
         services.AddSingleton<PiperTtsSynthesizer>();
         services.AddSingleton<IJitsiBotService, JitsiBotService>();
         services.AddSingleton<IAIChat, GeminiAiChat>();

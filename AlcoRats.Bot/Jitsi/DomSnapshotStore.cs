@@ -8,9 +8,16 @@ namespace AlcoRats.Bot.Jitsi;
 /// <summary>
 /// Saves page DOM snapshots under <c>doms/</c> for offline UI analysis (Gravatar, login, prejoin, …).
 /// </summary>
-static class DomSnapshotStore
+sealed class DomSnapshotStore : IDomSnapshotStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
+    private readonly ILogger<DomSnapshotStore> _logger;
+
+    public DomSnapshotStore(ILogger<DomSnapshotStore> logger)
+    {
+        _logger = logger;
+    }
 
     public static string ResolveDomsDirectory()
     {
@@ -19,15 +26,10 @@ static class DomSnapshotStore
         if (IsProjectDomsCandidate(fromBin))
             return fromBin;
 
-        var besideApp = Path.Combine(AppContext.BaseDirectory, "doms");
-        return besideApp;
+        return Path.Combine(AppContext.BaseDirectory, "doms");
     }
 
-    public static async Task SaveAsync(
-        IPage page,
-        string screenName,
-        ILogger logger,
-        CancellationToken cancellationToken = default)
+    public async Task SaveAsync(IPage page, string screenName, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -112,11 +114,11 @@ static class DomSnapshotStore
                 Encoding.UTF8,
                 cancellationToken);
 
-            logger.LogInformation("DOM snapshot saved: {Html} (+ {Meta})", htmlPath, Path.GetFileName(metaPath));
+            _logger.LogInformation("DOM snapshot saved: {Html} (+ {Meta})", htmlPath, Path.GetFileName(metaPath));
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to save DOM snapshot for screen {Screen}", screenName);
+            _logger.LogWarning(ex, "Failed to save DOM snapshot for screen {Screen}", screenName);
         }
     }
 

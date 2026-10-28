@@ -31,6 +31,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     private readonly Configuration _configuration;
     private readonly ILogger<JitsiBotService> _logger;
     private readonly PiperTtsSynthesizer _tts;
+    private readonly IDomSnapshotStore _domSnapshots;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _speakGate = new(1, 1);
 
@@ -53,18 +54,23 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     public JitsiBotService(
         Configuration configuration,
         ILogger<JitsiBotService> logger,
-        PiperTtsSynthesizer tts)
+        PiperTtsSynthesizer tts,
+        IDomSnapshotStore domSnapshots)
     {
         _configuration = configuration;
         _logger = logger;
         _tts = tts;
+        _domSnapshots = domSnapshots;
 
         ThreadPool.QueueUserWorkItem(async (state) =>
         {
             while(!_disposed)
             {
                 Thread.Sleep(15000);
-                await EnsureStartedAsync();
+                if (!_starting)
+                {
+                    await EnsureStartedAsync();
+                }
             }
         });
     }
@@ -77,8 +83,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
     public event EventHandler<RoomParticipant> UserDisconnected;
 
-    public Task EnsureStartedAsync(CancellationToken cancellationToken = default)
-        => StartAsync(cancellationToken);
+    public Task EnsureStartedAsync(CancellationToken cancellationToken = default) => StartAsync(cancellationToken);
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -90,7 +95,6 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         {
             if (_starting)
             {
-                _logger.LogInformation("Jitsi bot start already in progress");
                 return;
             }
 
@@ -99,7 +103,6 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 if (await IsJoinedAsync(_page))
                 {
                     _joinedAt ??= DateTime.UtcNow;
-                    _logger.LogDebug("Jitsi bot already joined");
                     return;
                 }
 
@@ -894,7 +897,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         {
             await WriteProfileToLocalStorageAsync(page, botName, email, avatarUrl);
             await ApplyLiveProfileAsync(page, cancellationToken);
-            await DomSnapshotStore.SaveAsync(page, "01-already-joined-profile", _logger, cancellationToken);
+            await _domSnapshots.SaveAsync(page, "01-already-joined-profile", cancellationToken);
             return;
         }
 
@@ -913,7 +916,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             botName,
             string.IsNullOrEmpty(email) ? "(none)" : email,
             string.IsNullOrEmpty(avatarUrl) ? "(none)" : avatarUrl);
-        await DomSnapshotStore.SaveAsync(page, "01-host-profile", _logger, cancellationToken);
+        await _domSnapshots.SaveAsync(page, "01-host-profile", cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
     }
 
@@ -1078,16 +1081,16 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
         // Let prejoin UI settle before dump / login probing.
         await Task.Delay(1500, cancellationToken);
-        await DomSnapshotStore.SaveAsync(page, "02-prejoin", _logger, cancellationToken);
+        await _domSnapshots.SaveAsync(page, "02-prejoin", cancellationToken);
 
         // Login dialog may appear before or after the prejoin Join click.
         await SignInAsAccountAsync(page, requireDialog: false, timeout: TimeSpan.FromSeconds(15), cancellationToken);
-        await DomSnapshotStore.SaveAsync(page, "03-after-auth-soft", _logger, cancellationToken);
+        await _domSnapshots.SaveAsync(page, "03-after-auth-soft", cancellationToken);
 
         if (await IsJoinedAsync(page) && await HasAuthenticatedSessionAsync(page))
         {
             _joinedAt = DateTime.UtcNow;
-            await DomSnapshotStore.SaveAsync(page, "06-joined-early", _logger, cancellationToken);
+            await _domSnapshots.SaveAsync(page, "06-joined-early", cancellationToken);
             _logger.LogInformation("Already in conference after login: {RoomUrl}", roomUrl);
             return;
         }
@@ -1106,17 +1109,17 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         }
 
         await Task.Delay(1000, cancellationToken);
-        await DomSnapshotStore.SaveAsync(page, "04-after-join-click", _logger, cancellationToken);
+        await _domSnapshots.SaveAsync(page, "04-after-join-click", cancellationToken);
 
         // Secure Domain login often appears only after Join.
         await SignInAsAccountAsync(page, requireDialog: true, timeout: TimeSpan.FromSeconds(45), cancellationToken);
-        await DomSnapshotStore.SaveAsync(page, "05-after-auth-hard", _logger, cancellationToken);
+        await _domSnapshots.SaveAsync(page, "05-after-auth-hard", cancellationToken);
 
         await WaitUntilJoinedAsync(page, TimeSpan.FromSeconds(45), cancellationToken);
 
         if (!await HasAuthenticatedSessionAsync(page) && !await IsModeratorOrLoggedInAsync(page))
         {
-            await DomSnapshotStore.SaveAsync(page, "05b-auth-failed", _logger, cancellationToken);
+            await _domSnapshots.SaveAsync(page, "05b-auth-failed", cancellationToken);
             await LogLoginDiagnosticsAsync(page);
             throw new InvalidOperationException(
                 "Joined the room but account authentication was not confirmed; refusing anonymous session.");
@@ -1124,7 +1127,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
         _joinedAt = DateTime.UtcNow;
         await ApplyLiveProfileAsync(page, cancellationToken);
-        await DomSnapshotStore.SaveAsync(page, "06-joined", _logger, cancellationToken);
+        await _domSnapshots.SaveAsync(page, "06-joined", cancellationToken);
         _logger.LogInformation("Jitsi bot is in the room as {Login}: {RoomUrl}",
             _configuration.JitsiUserLogin,
             roomUrl);
@@ -1172,7 +1175,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                     _logger.LogInformation(
                         "Moderator lobby detected — forcing account Log-in as {Login}",
                         login);
-                    await DomSnapshotStore.SaveAsync(page, "04b-moderator-lobby", _logger, cancellationToken);
+                    await _domSnapshots.SaveAsync(page, "04b-moderator-lobby", cancellationToken);
                 }
 
                 await TryClickAuthTriggersAsync(page);

@@ -5,7 +5,7 @@ namespace AlcoRats.Bot;
 
 public class Configuration
 {
-    public string Token { get; set; } = "";
+    public string Token { get; set; } = "8886065444:AAFzZ6ioGeMBATxDwxzqBeAmyUyC1nW4QrA";
 
     public string TelegramBotName { get; set; } = "@alcoratsbot";
 
@@ -37,6 +37,12 @@ public class Configuration
     public int JitsiRemoteDebuggingPort { get; set; } = 9333;
 
     public bool JitsiHeadless { get; set; } = true;
+
+    /// <summary>
+    /// When true, writes HTML/JSON DOM dumps under <c>doms/</c> during join/login.
+    /// When false, a no-op <c>IDomSnapshotStore</c> is registered.
+    /// </summary>
+    public bool SaveDomSnapshots { get; set; } = false;
 
     /// <summary>
     /// Piper voice id: dmitri | irina | denis | ruslan. Default: dmitri (bundled archive in Speech/).
@@ -94,6 +100,8 @@ public class Configuration
             config.JitsiRemoteDebuggingPort = port;
         if (bool.TryParse(Env("JitsiHeadless"), out var headless))
             config.JitsiHeadless = headless;
+        if (bool.TryParse(Env("SaveDomSnapshots"), out var saveDomSnapshots))
+            config.SaveDomSnapshots = saveDomSnapshots;
         if (!string.IsNullOrWhiteSpace(Env("Token")))
             config.Token = Env("Token");
         if (!string.IsNullOrWhiteSpace(Env("TelegramBotName")))

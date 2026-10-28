@@ -7,7 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace AlcoRats.Android;
 
 /// <summary>
-/// Holds a <see cref="PowerManager.WakeLockFlags.Partial"/> wake lock while a conference is live
+/// Holds wake lock while a conference is live
 /// so Doze does not freeze the WebView/JS bridge after the screen turns off.
 /// </summary>
 internal static class ConferenceWakeLock

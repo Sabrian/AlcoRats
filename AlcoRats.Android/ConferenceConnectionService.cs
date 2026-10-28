@@ -25,6 +25,7 @@ public sealed class ConferenceConnectionService : ConnectionService
     private static ILogger Logger
         => NullLogger.Instance;
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "<Pending>")]
     public override Connection OnCreateOutgoingConnection(
         PhoneAccountHandle? connectionManagerPhoneAccount,
         ConnectionRequest? request)
@@ -46,6 +47,7 @@ public sealed class ConferenceConnectionService : ConnectionService
         return connection;
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "<Pending>")]
     public override Connection OnCreateIncomingConnection(
         PhoneAccountHandle? connectionManagerPhoneAccount,
         ConnectionRequest? request)

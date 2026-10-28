@@ -254,6 +254,7 @@ public class MainActivity : AvaloniaMainActivity
     /// Asks for the next missing permission group. Never overlaps two system dialogs.
     /// Order: camera+mic first (needed for call + mic FGS), then notifications (Android 13+).
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "<Pending>")]
     private void RequestNextPermission()
     {
         if (_permissionRequestInFlight)

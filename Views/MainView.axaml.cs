@@ -41,7 +41,7 @@ public partial class MainView : UserControl
     private bool _settingsOpen;
     private bool _settingsAnimating;
     private readonly TranslateTransform _settingsTransform = new();
-    private NativeWebView? RoomWebView;
+    private NativeWebView RoomWebView;
 
     /// <summary>Last DOM snapshot from <see cref="GetDomModel"/> (debugger / logcat).</summary>
     public string LastDomModel { get; private set; } = string.Empty;
@@ -1538,7 +1538,7 @@ public partial class MainView : UserControl
             WebViewPlatformSetup.Apply(RoomWebView);
     }
 
-    private void OnGoLiveClick(object? sender, RoutedEventArgs e)
+    private void OnGoLiveClick(object sender, RoutedEventArgs e)
     {
         try
         {

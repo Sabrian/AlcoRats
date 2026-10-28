@@ -65,6 +65,11 @@ public sealed class ConferenceMediaSessionService : Service
     private DateTime _chatJoinGraceStartedUtc = DateTime.MinValue;
     private const int ChatJoinStableTicksRequired = 4;
     private static readonly TimeSpan ChatJoinGrace = TimeSpan.FromSeconds(12);
+    /// <summary>
+    /// Wall-clock ms when the current call became active. CallStyle chronometer uses
+    /// notification <c>when</c>; refreshing with "now" makes the shade jump 00:00↔00:01.
+    /// </summary>
+    private long _callStartedAtMs;
     private static readonly object ToneLock = new();
     private Java.Lang.IRunnable? _clearMicPendingRunnable;
     private Java.Lang.IRunnable? _clearCamPendingRunnable;
@@ -432,10 +437,14 @@ public sealed class ConferenceMediaSessionService : Service
     {
         if (!state.IsActive)
         {
+            _callStartedAtMs = 0;
             ReleaseKeepAlive();
             DismissShade();
             return;
         }
+
+        if (_callStartedAtMs <= 0)
+            _callStartedAtMs = Java.Lang.JavaSystem.CurrentTimeMillis();
 
         AcquireKeepAlive(state);
         var notification = BuildNotification(state);
@@ -575,6 +584,9 @@ public sealed class ConferenceMediaSessionService : Service
         var hangupIntent = CreateActionPendingIntent(ActionLeave, requestCode: 44);
 
         var icon = ApplicationInfo?.Icon ?? global::Android.Resource.Drawable.IcMediaPlay;
+        var startedAt = _callStartedAtMs > 0
+            ? _callStartedAtMs
+            : Java.Lang.JavaSystem.CurrentTimeMillis();
         var builder = new NotificationCompat.Builder(this, ChannelId)!
             .SetSmallIcon(icon)!
             .SetContentIntent(contentIntent)!
@@ -582,7 +594,11 @@ public sealed class ConferenceMediaSessionService : Service
             .SetOnlyAlertOnce(true)!
             .SetCategory(NotificationCompat.CategoryCall)!
             .SetVisibility(NotificationCompat.VisibilityPublic)!
-            .SetPriority((int)NotificationPriority.Max)!;
+            .SetPriority((int)NotificationPriority.Max)!
+            // Stable start time — CallStyle shows elapsed since `when`.
+            .SetWhen(startedAt)!
+            .SetShowWhen(true)!
+            .SetUsesChronometer(true)!;
 
         var names = string.Join(", ", state.Participants.Take(CollapsedParticipantSlots).Select(p => p.Name));
         if (string.IsNullOrWhiteSpace(names))

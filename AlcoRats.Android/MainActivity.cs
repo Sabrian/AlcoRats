@@ -64,13 +64,6 @@ public class MainActivity : AvaloniaMainActivity
         WireConferenceShadeLifecycle();
     }
 
-    protected override void OnDestroy()
-    {
-        if (ReferenceEquals(Current, this))
-            Current = null;
-        base.OnDestroy();
-    }
-
     /// <summary>
     /// Edge-to-edge with padding for all system bars (status, nav, cutout).
     /// Avalonia chrome (bottom StatusPanel) must sit above the nav bar.
@@ -152,17 +145,26 @@ public class MainActivity : AvaloniaMainActivity
 
     protected override void OnDestroy()
     {
-        if (_conference is not null)
+        try
         {
-            _conference.StateChanged -= OnConferenceStateChangedForShade;
-            _conference = null;
+            if (_conference is not null)
+            {
+                _conference.StateChanged -= OnConferenceStateChangedForShade;
+                _conference = null;
+            }
+
+            if (IsFinishing)
+            {
+                ConferenceMediaSessionService.Stop(this);
+                _mediaSessionStarted = false;
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(Current, this))
+                Current = null;
         }
 
-        if (IsFinishing)
-        {
-            ConferenceMediaSessionService.Stop(this);
-            _mediaSessionStarted = false;
-        }
 
         base.OnDestroy();
     }

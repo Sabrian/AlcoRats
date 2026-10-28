@@ -45,13 +45,17 @@ public static class ConferenceTelecom
                     return;
 
                 var handle = CreateHandle(context);
-                var account = new PhoneAccount.Builder(handle, "AlcoRats")
-                    .SetCapabilities((int)PhoneAccountCapability.SelfManaged)
-                    .SetShortDescription("Конференция AlcoRats")
+                var account = new PhoneAccount.Builder(handle, "AlcoRats")?
+                    .SetCapabilities((int)PhoneAccountCapability.SelfManaged)?
+                    .SetShortDescription("Конференция AlcoRats")?
                     .Build();
-                telecom.RegisterPhoneAccount(account);
-                _accountRegistered = true;
-                logger.LogInformation("Telecom PhoneAccount registered ({Id})", PhoneAccountId);
+
+                if (account != null)
+                {
+                    telecom.RegisterPhoneAccount(account);
+                    _accountRegistered = true;
+                    logger.LogInformation("Telecom PhoneAccount registered ({Id})", PhoneAccountId);
+                }
             }
             catch (Exception ex)
             {

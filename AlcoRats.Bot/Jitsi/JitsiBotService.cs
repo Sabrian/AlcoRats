@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using AlcoRats.Bot.Models;
 using AlcoRats.Bot.Speech;
 using Microsoft.Extensions.Logging;
@@ -62,14 +64,21 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         _tts = tts;
         _domSnapshots = domSnapshots;
 
-        ThreadPool.QueueUserWorkItem(async (state) =>
+        ThreadPool.QueueUserWorkItem(async _ =>
         {
-            while(!_disposed)
+            while (!_disposed)
             {
-                Thread.Sleep(15000);
-                if (!_starting)
+                try
                 {
+                    await Task.Delay(15_000);
+                    if (_disposed || _starting)
+                        continue;
                     await EnsureStartedAsync();
+                }
+                catch (Exception ex)
+                {
+                    // Never let the keep-alive loop tear down the process.
+                    _logger.LogWarning(ex, "Jitsi keep-alive EnsureStartedAsync failed");
                 }
             }
         });
@@ -139,6 +148,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 // DOM dump showed attach lands already in-room: localStorage alone does not
                 // refresh avatar/email — push profile into the live conference.
                 await ApplyLiveProfileAsync(_page, cancellationToken);
+                await InstallSilentVirtualMicAsync(_page, cancellationToken);
                 _joinedAt ??= DateTime.UtcNow;
                 _logger.LogInformation("Attached to existing joined Jitsi session");
                 return;
@@ -146,10 +156,11 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
             await JoinConferenceAsync(_page, cancellationToken);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger.LogError(ex, "Jitsi StartAsync failed");
             await DisposeBrowserAsync();
-            throw;
+            // Do not rethrow — keep host alive; keep-alive loop will retry.
         }
         finally
         {
@@ -414,58 +425,204 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
         await EnsureStartedAsync(cancellationToken);
 
-        await _speakGate.WaitAsync(cancellationToken);
-        string wavPath = null;
-        try
-        {
-            wavPath = await _tts.SynthesizeToWavFileAsync(text, cancellationToken);
-            var wavBytes = await File.ReadAllBytesAsync(wavPath, cancellationToken);
-            var wavBase64 = Convert.ToBase64String(wavBytes);
+        var chunks = SplitIntoSpeechChunks(text, maxChars: 128);
+        if (chunks.Count == 0)
+            return;
 
-            await _gate.WaitAsync(cancellationToken);
+        await _speakGate.WaitAsync(cancellationToken);
+        // Bounded queue: producer can synthesize one chunk ahead while Jitsi plays the previous.
+        using var playQueue = new BlockingCollection<string>(boundedCapacity: 2);
+        Exception producerError = null;
+        var producerDone = new ManualResetEventSlim(false);
+
+        var producer = new Thread(() =>
+        {
             try
             {
-                if (_page == null || _browser is not { IsClosed: false })
-                    throw new InvalidOperationException("Jitsi browser is not available.");
-
-                if (!await IsJoinedAsync(_page))
-                    throw new InvalidOperationException("Jitsi bot is not in the conference.");
-
-                var json = await EvaluateInMainWorldAsyncAsync(_page, PublishWavToConferenceScript, wavBase64);
-                using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
-                var root = doc.RootElement;
-                var ok = root.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
-                if (!ok)
+                for (var i = 0; i < chunks.Count; i++)
                 {
-                    var error = root.TryGetProperty("error", out var errProp)
-                        ? errProp.GetString()
-                        : "unknown";
-                    throw new InvalidOperationException($"Failed to publish Piper WAV to Jitsi: {error}");
-                }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var chunk = chunks[i];
+                    _logger.LogDebug(
+                        "TTS producer chunk {Index}/{Total}: {Preview}",
+                        i + 1,
+                        chunks.Count,
+                        chunk.Length > 60 ? chunk[..60] + "…" : chunk);
 
-                var durationMs = root.TryGetProperty("durationMs", out var durProp) && durProp.TryGetDouble(out var d)
-                    ? d
-                    : 0;
-                _logger.LogInformation(
-                    "Spoke via Piper ({Engine}), textLength={Length}, durationMs={DurationMs:0}",
-                    _tts.EngineName,
-                    text.Length,
-                    durationMs);
+                    var path = _tts.SynthesizeToWavFileAsync(chunk, cancellationToken)
+                        .GetAwaiter()
+                        .GetResult();
+                    playQueue.Add(path, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // stop requested
+            }
+            catch (Exception ex)
+            {
+                producerError = ex;
+                _logger.LogWarning(ex, "TTS producer failed");
             }
             finally
             {
-                _gate.Release();
+                playQueue.CompleteAdding();
+                producerDone.Set();
             }
+        })
+        {
+            IsBackground = true,
+            Name = "JitsiTtsProducer",
+        };
+
+        var totalDurationMs = 0.0;
+        var played = 0;
+        try
+        {
+            producer.Start();
+
+            foreach (var wavPath in playQueue.GetConsumingEnumerable(cancellationToken))
+            {
+                try
+                {
+                    var durationMs = await PublishWavFileToConferenceAsync(wavPath, cancellationToken);
+                    totalDurationMs += durationMs;
+                    played++;
+                }
+                finally
+                {
+                    try { File.Delete(wavPath); } catch { /* ignore */ }
+                }
+            }
+
+            // Ensure producer finished (and surface its error after draining what we could play).
+            producerDone.Wait(cancellationToken);
+            if (producerError != null)
+                throw new InvalidOperationException("TTS producer failed while synthesizing speech.", producerError);
+
+            _logger.LogInformation(
+                "Spoke via Piper ({Engine}), textLength={Length}, chunks={Chunks}, played={Played}, durationMs={DurationMs:0}",
+                _tts.EngineName,
+                text.Length,
+                chunks.Count,
+                played,
+                totalDurationMs);
         }
         finally
         {
-            if (wavPath != null)
+            playQueue.CompleteAdding();
+            if (!producerDone.IsSet)
+                producerDone.Wait(TimeSpan.FromSeconds(30));
+            // Drain leftover files if consumer aborted early.
+            while (playQueue.TryTake(out var leftover))
             {
-                try { File.Delete(wavPath); } catch { /* ignore */ }
+                try { File.Delete(leftover); } catch { /* ignore */ }
             }
 
+            producerDone.Dispose();
             _speakGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Publishes one WAV file into the conference; returns spoken duration in ms.
+    /// </summary>
+    private async Task<double> PublishWavFileToConferenceAsync(string wavPath, CancellationToken cancellationToken)
+    {
+        var wavBytes = await File.ReadAllBytesAsync(wavPath, cancellationToken);
+        var wavBase64 = Convert.ToBase64String(wavBytes);
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_page == null || _browser is not { IsClosed: false })
+                throw new InvalidOperationException("Jitsi browser is not available.");
+
+            if (!await IsJoinedAsync(_page))
+                throw new InvalidOperationException("Jitsi bot is not in the conference.");
+
+            var json = await EvaluateInMainWorldAsyncAsync(_page, PublishWavToConferenceScript, wavBase64);
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
+            var root = doc.RootElement;
+            var ok = root.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
+            if (!ok)
+            {
+                var error = root.TryGetProperty("error", out var errProp)
+                    ? errProp.GetString()
+                    : "unknown";
+                throw new InvalidOperationException($"Failed to publish Piper WAV to Jitsi: {error}");
+            }
+
+            return root.TryGetProperty("durationMs", out var durProp) && durProp.TryGetDouble(out var d)
+                ? d
+                : 0;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Packs text into TTS chunks broken at <c>.</c> / <c>,</c>, flushing once length reaches <paramref name="maxChars"/>.
+    /// </summary>
+    private static List<string> SplitIntoSpeechChunks(string text, int maxChars = 128)
+    {
+        if (maxChars < 1)
+            maxChars = 1;
+
+        var normalized = Regex.Replace(text.Trim(), @"\s+", " ");
+        if (normalized.Length == 0)
+            return [];
+
+        var chunks = new List<string>();
+        var current = new StringBuilder();
+
+        for (var i = 0; i < normalized.Length; i++)
+        {
+            current.Append(normalized[i]);
+            var ch = normalized[i];
+            var atBreak = ch is '.' or ',';
+            if (!atBreak)
+                continue;
+
+            // Flush at punctuation once the chunk has reached the target size.
+            if (current.Length >= maxChars)
+            {
+                var piece = current.ToString().Trim();
+                if (piece.Length > 0)
+                    chunks.Add(piece);
+                current.Clear();
+            }
+        }
+
+        if (current.Length > 0)
+        {
+            var tail = current.ToString().Trim();
+            if (tail.Length == 0)
+                return chunks;
+
+            // No trailing punctuation / under maxChars: append to last chunk if it stays reasonable,
+            // otherwise emit as its own chunk (hard-split overlong runs without .|,).
+            if (chunks.Count > 0 && chunks[^1].Length + 1 + tail.Length <= maxChars * 2)
+            {
+                chunks[^1] = chunks[^1] + " " + tail;
+            }
+            else if (tail.Length <= maxChars)
+            {
+                chunks.Add(tail);
+            }
+            else
+            {
+                for (var offset = 0; offset < tail.Length; offset += maxChars)
+                {
+                    var len = Math.Min(maxChars, tail.Length - offset);
+                    chunks.Add(tail.Substring(offset, len).Trim());
+                }
+            }
+        }
+
+        return chunks.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
     }
 
     public async Task StopAsync()
@@ -814,10 +971,13 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         Directory.CreateDirectory(userDataDir);
 
         var executablePath = await ResolveChromiumPathAsync(cancellationToken);
+        // Fake mic file = silence (Chrome's default fake device is a loud test tone).
+        var silentWav = EnsureSilentCaptureWav(userDataDir);
         var args = new List<string>
         {
             "--use-fake-ui-for-media-stream",
             "--use-fake-device-for-media-stream",
+            $"--use-file-for-fake-audio-capture={silentWav}",
             "--mute-audio",
             "--autoplay-policy=no-user-gesture-required",
             "--no-sandbox",
@@ -1055,8 +1215,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         var host = NormalizeHost(_configuration.JitsiHost);
         var room = (_configuration.JitsiRoom ?? string.Empty).Trim().Trim('/');
         var roomUrl = $"{host}/{room.ToLowerInvariant()}";
+        // Mic must stay on for TTS; video stays muted.
         var joinUrl =
-            $"{roomUrl}#config.startWithAudioMuted=true&config.startWithVideoMuted=true";
+            $"{roomUrl}#config.startWithAudioMuted=false&config.startWithVideoMuted=true";
 
         // HTTP Basic Auth (some Prosody Secure Domain setups).
         try
@@ -1090,6 +1251,7 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         if (await IsJoinedAsync(page) && await HasAuthenticatedSessionAsync(page))
         {
             _joinedAt = DateTime.UtcNow;
+            await InstallSilentVirtualMicAsync(page, cancellationToken);
             await _domSnapshots.SaveAsync(page, "06-joined-early", cancellationToken);
             _logger.LogInformation("Already in conference after login: {RoomUrl}", roomUrl);
             return;
@@ -1117,20 +1279,65 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
         await WaitUntilJoinedAsync(page, TimeSpan.FromSeconds(45), cancellationToken);
 
-        if (!await HasAuthenticatedSessionAsync(page) && !await IsModeratorOrLoggedInAsync(page))
+        // Auth flags lag behind navigation after Secure Domain login — poll, don't fail on first miss.
+        var authenticated = await WaitUntilAuthenticatedAsync(page, TimeSpan.FromSeconds(30), cancellationToken);
+        if (!authenticated)
         {
             await _domSnapshots.SaveAsync(page, "05b-auth-failed", cancellationToken);
             await LogLoginDiagnosticsAsync(page);
-            throw new InvalidOperationException(
-                "Joined the room but account authentication was not confirmed; refusing anonymous session.");
+            // Soft-fail: stay connected for retry via keep-alive instead of crashing the host.
+            _logger.LogWarning(
+                "Joined but account authentication was not confirmed; will retry on keep-alive. Room={RoomUrl}",
+                roomUrl);
         }
 
         _joinedAt = DateTime.UtcNow;
         await ApplyLiveProfileAsync(page, cancellationToken);
+        await InstallSilentVirtualMicAsync(page, cancellationToken);
         await _domSnapshots.SaveAsync(page, "06-joined", cancellationToken);
-        _logger.LogInformation("Jitsi bot is in the room as {Login}: {RoomUrl}",
+        _logger.LogInformation(
+            authenticated
+                ? "Jitsi bot is in the room as {Login}: {RoomUrl}"
+                : "Jitsi bot is in the room (auth unconfirmed) as {Login}: {RoomUrl}",
             _configuration.JitsiUserLogin,
             roomUrl);
+    }
+
+    /// <summary>
+    /// Replaces Chrome fake/hardware mic with a silent WebAudio track (unmuted for TTS).
+    /// </summary>
+    private async Task InstallSilentVirtualMicAsync(IPage page, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var json = await EvaluateInMainWorldAsyncAsync(page, InstallSilentVirtualMicScript, null);
+            _logger.LogInformation("Silent virtual mic installed: {Result}", json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to install silent virtual microphone");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    /// <summary>
+    /// Mutes, tears down virtual mic, leaves the conference — stops audio even if Chromium stays up.
+    /// </summary>
+    private async Task SilenceAndLeaveAsync(IPage page)
+    {
+        if (page == null)
+            return;
+
+        try
+        {
+            var json = await EvaluateInMainWorldAsyncAsync(page, SilenceAndLeaveScript, null);
+            _logger.LogInformation("Silenced / left conference: {Result}", json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "SilenceAndLeave skipped");
+        }
     }
 
     private async Task SignInAsAccountAsync(
@@ -1736,74 +1943,69 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         """;
 
     private static async Task<bool> HasAuthenticatedSessionAsync(IPage page)
-    {
-        try
-        {
-            return await page.EvaluateFunctionAsync<bool>(
-                """
-                () => {
-                    try {
-                        if (typeof APP === 'undefined' || !APP.store || typeof APP.store.getState !== 'function')
-                            return false;
-                        var state = APP.store.getState();
-                        var jwt = state['features/base/jwt'] || {};
-                        if (jwt.jwt || jwt.user)
-                            return true;
-                        var conf = state['features/base/conference'] || {};
-                        // Only treat as authed when conference exists and auth is explicitly not required
-                        // OR local participant is already a moderator (Secure Domain success).
-                        if (conf.conference && conf.authRequired === false)
-                            return true;
-                        var parts = state['features/base/participants'] || {};
-                        var local = parts.local;
-                        if (local && (local.role === 'moderator' || local.features && local.features['jitsi_moderator'] === true))
-                            return true;
-                        return false;
-                    } catch (e) {
-                        return false;
-                    }
-                }
-                """);
-        }
-        catch
-        {
-            return false;
-        }
-    }
+        => await EvaluateBoolWithRetryAsync(page, AuthSessionScript);
 
     private static async Task<bool> IsModeratorOrLoggedInAsync(IPage page)
-    {
-        try
-        {
-            return await page.EvaluateFunctionAsync<bool>(
-                """
-                () => {
+        => await EvaluateBoolWithRetryAsync(page, AuthSessionScript);
+
+    private const string AuthSessionScript =
+        """
+        () => {
+            try {
+                if (typeof APP === 'undefined') return false;
+
+                if (APP.conference) {
                     try {
-                        if (typeof APP === 'undefined') return false;
-                        if (APP.store && typeof APP.store.getState === 'function') {
-                            var state = APP.store.getState();
-                            var jwt = state['features/base/jwt'] || {};
-                            if (jwt.jwt || jwt.user) return true;
-                            var local = (state['features/base/participants'] || {}).local;
-                            if (local && local.role === 'moderator') return true;
-                        }
-                        if (APP.conference) {
-                            if (typeof APP.conference.isModerator === 'function' && APP.conference.isModerator())
-                                return true;
-                            if (typeof APP.conference.getRole === 'function'
-                                && String(APP.conference.getRole() || '').toLowerCase() === 'moderator')
-                                return true;
-                        }
-                    } catch (e) {}
-                    return false;
+                        if (typeof APP.conference.isModerator === 'function' && APP.conference.isModerator())
+                            return true;
+                        if (typeof APP.conference.getRole === 'function'
+                            && String(APP.conference.getRole() || '').toLowerCase() === 'moderator')
+                            return true;
+                    } catch (eConf) {}
                 }
-                """);
+
+                if (!APP.store || typeof APP.store.getState !== 'function')
+                    return false;
+
+                var state = APP.store.getState();
+                var jwt = state['features/base/jwt'] || {};
+                if (jwt.jwt || jwt.user)
+                    return true;
+
+                var local = (state['features/base/participants'] || {}).local;
+                if (local && (local.role === 'moderator'
+                    || (local.features && local.features['jitsi_moderator'] === true)))
+                    return true;
+
+                var conf = state['features/base/conference'] || {};
+                if (conf.conference && conf.authRequired === false)
+                    return true;
+
+                // Secure Domain XMPP: authenticated identity on the connection.
+                var conn = state['features/base/connection'] || {};
+                if (conn.user || conn.password)
+                    return true;
+
+                var auth = state['features/authentication'] || {};
+                if (auth.thenableWithTimeout || auth.authenticated === true)
+                    return true;
+
+                // Not stuck in wait-for-moderator lobby and already joined → treat as OK.
+                try {
+                    var body = ((document.body && document.body.innerText) || '').toLowerCase();
+                    var waiting = body.indexOf('waiting for a moderator') >= 0
+                        || body.indexOf('ожидание модератора') >= 0;
+                    if (!waiting && APP.conference && typeof APP.conference.isJoined === 'function'
+                        && APP.conference.isJoined())
+                        return true;
+                } catch (eBody) {}
+
+                return false;
+            } catch (e) {
+                return false;
+            }
         }
-        catch
-        {
-            return false;
-        }
-    }
+        """;
 
     private async Task LogLoginDiagnosticsAsync(IPage page)
     {
@@ -1848,25 +2050,55 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     }
 
     private static async Task<bool> IsJoinedAsync(IPage page)
+        => await EvaluateBoolWithRetryAsync(
+            page,
+            """
+            () => {
+                try {
+                    if (typeof APP !== 'undefined' && APP.conference
+                        && typeof APP.conference.isJoined === 'function')
+                        return !!APP.conference.isJoined();
+                } catch (e) {}
+                return false;
+            }
+            """);
+
+    private static async Task<bool> EvaluateBoolWithRetryAsync(IPage page, string script, int attempts = 6)
     {
-        try
+        for (var i = 0; i < attempts; i++)
         {
-            return await page.EvaluateFunctionAsync<bool>(
-                """
-                () => {
-                    try {
-                        if (typeof APP !== 'undefined' && APP.conference
-                            && typeof APP.conference.isJoined === 'function')
-                            return !!APP.conference.isJoined();
-                    } catch (e) {}
-                    return false;
-                }
-                """);
+            try
+            {
+                return await page.EvaluateFunctionAsync<bool>(script);
+            }
+            catch (Exception ex) when (IsTransientPageEvalError(ex) && i < attempts - 1)
+            {
+                // Login / room navigation destroys the JS context mid-evaluate.
+                await Task.Delay(400);
+            }
+            catch
+            {
+                return false;
+            }
         }
-        catch
+
+        return false;
+    }
+
+    private static bool IsTransientPageEvalError(Exception ex)
+    {
+        for (var e = ex; e != null; e = e.InnerException)
         {
-            return false;
+            var msg = e.Message ?? "";
+            if (msg.Contains("Execution context was destroyed", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("most likely because of a navigation", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Target closed", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Session closed", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Cannot find context", StringComparison.OrdinalIgnoreCase))
+                return true;
         }
+
+        return false;
     }
 
     private async Task WaitUntilJoinedAsync(IPage page, TimeSpan timeout, CancellationToken cancellationToken)
@@ -1883,10 +2115,37 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         _logger.LogWarning("Timed out waiting for APP.conference.isJoined()");
     }
 
-    private Task DisposeBrowserAsync()
+    private async Task<bool> WaitUntilAuthenticatedAsync(
+        IPage page,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
-        // Disconnect only — leave Chromium running so the next process can attach
-        // via remote debugging and reuse the authenticated session.
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (await HasAuthenticatedSessionAsync(page) || await IsModeratorOrLoggedInAsync(page))
+                return true;
+            await Task.Delay(500, cancellationToken);
+        }
+
+        return await HasAuthenticatedSessionAsync(page) || await IsModeratorOrLoggedInAsync(page);
+    }
+
+    private async Task DisposeBrowserAsync()
+    {
+        // Leave/mute first so Chromium does not keep broadcasting after the process exits.
+        // Then disconnect only — leave Chromium running for remote-debug reconnect.
+        try
+        {
+            if (_page != null)
+                await SilenceAndLeaveAsync(_page);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Silence before disconnect failed");
+        }
+
         _joinedAt = null;
         _page = null;
 
@@ -1907,7 +2166,6 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
         _browser = null;
         _ownsBrowser = false;
-        return Task.CompletedTask;
     }
 
     private string ResolveUserDataDir()
@@ -1919,6 +2177,40 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "AlcoRats.Bot",
             "chromium-profile");
+    }
+
+    /// <summary>
+    /// Minimal silent WAV for <c>--use-file-for-fake-audio-capture</c> (avoids Chromium test-tone beeps).
+    /// </summary>
+    private static string EnsureSilentCaptureWav(string userDataDir)
+    {
+        var path = Path.Combine(userDataDir, "silent-capture.wav");
+        if (File.Exists(path) && new FileInfo(path).Length > 44)
+            return path;
+
+        Directory.CreateDirectory(userDataDir);
+        // 48 kHz mono 16-bit PCM, ~0.25 s of zeros (Chrome loops the file).
+        const int sampleRate = 48000;
+        const int channels = 1;
+        const int bitsPerSample = 16;
+        var dataBytes = sampleRate / 4 * channels * (bitsPerSample / 8);
+        using var fs = File.Create(path);
+        using var bw = new BinaryWriter(fs);
+        bw.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
+        bw.Write(36 + dataBytes);
+        bw.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
+        bw.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
+        bw.Write(16);
+        bw.Write((short)1);
+        bw.Write((short)channels);
+        bw.Write(sampleRate);
+        bw.Write(sampleRate * channels * bitsPerSample / 8);
+        bw.Write((short)(channels * bitsPerSample / 8));
+        bw.Write((short)bitsPerSample);
+        bw.Write(System.Text.Encoding.ASCII.GetBytes("data"));
+        bw.Write(dataBytes);
+        bw.Write(new byte[dataBytes]);
+        return path;
     }
 
     private async Task<string> ResolveChromiumPathAsync(CancellationToken cancellationToken)
@@ -1977,91 +2269,223 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     }
 
     /// <summary>
-    /// async function(wavBase64) — decode full WAV, publish via Jitsi local audio track, wait until finished.
+    /// Shared JS helpers for silent virtual mic + unmute (injected into page scripts).
+    /// </summary>
+    private const string VirtualMicHelpersJs =
+        """
+        async function arUnmute(app, conference) {
+            var via = [];
+            try {
+                var selectors = [
+                    '[aria-label="Unmute microphone"]',
+                    '[aria-label="Unmute"]',
+                    '[aria-label*="Unmute microphone"]',
+                    '[aria-label="Включить микрофон"]',
+                    '[aria-label*="Включить микрофон"]'
+                ];
+                for (var s = 0; s < selectors.length; s++) {
+                    var el = document.querySelector(selectors[s]);
+                    if (el) { el.click(); via.push('dom:' + selectors[s]); break; }
+                }
+            } catch (eDom) {}
+            try {
+                if (app.conference && typeof app.conference.muteAudio === 'function') {
+                    app.conference.muteAudio(false);
+                    via.push('muteAudio(false)');
+                }
+            } catch (e1) {}
+            try {
+                if (conference && typeof conference.getLocalTracks === 'function') {
+                    var locals = conference.getLocalTracks() || [];
+                    for (var i = 0; i < locals.length; i++) {
+                        var tr = locals[i];
+                        if (!tr || typeof tr.getType !== 'function' || tr.getType() !== 'audio') continue;
+                        if (typeof tr.unmute === 'function') { await tr.unmute(); via.push('track.unmute'); }
+                        try {
+                            var mt = typeof tr.getTrack === 'function' ? tr.getTrack() : null;
+                            if (mt && mt.enabled === false) mt.enabled = true;
+                        } catch (eMt) {}
+                    }
+                }
+            } catch (e3) {}
+            try {
+                if (app.store && typeof app.store.dispatch === 'function') {
+                    app.store.dispatch({ type: 'SET_AUDIO_MUTED', muted: false });
+                    via.push('SET_AUDIO_MUTED');
+                }
+            } catch (e4) {}
+            return via;
+        }
+
+        function arGetConference(app) {
+            var conference = null;
+            try {
+                if (app.store && typeof app.store.getState === 'function') {
+                    var state = app.store.getState();
+                    conference = (state['features/base/conference'] || {}).conference || null;
+                }
+            } catch (eState) {}
+            if (!conference && app.conference && app.conference._room)
+                conference = app.conference._room;
+            return conference;
+        }
+
+        async function arEnsureSilentMic(app, conference) {
+            var Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!Ctx) throw new Error('no-audiocontext');
+
+            if (!window.__arAudio || !window.__arAudio.ctx || window.__arAudio.ctx.state === 'closed') {
+                var ctx = new Ctx();
+                if (ctx.state === 'suspended' && typeof ctx.resume === 'function')
+                    await ctx.resume();
+                var dest = ctx.createMediaStreamDestination();
+                // Near-zero keep-alive so the MediaStreamTrack stays live without audible noise.
+                var constant = ctx.createConstantSource();
+                constant.offset.value = 0;
+                var keepGain = ctx.createGain();
+                keepGain.gain.value = 0;
+                constant.connect(keepGain);
+                keepGain.connect(dest);
+                constant.start();
+                window.__arAudio = {
+                    ctx: ctx,
+                    dest: dest,
+                    constant: constant,
+                    keepGain: keepGain,
+                    jitsiTrack: null
+                };
+            }
+
+            var ar = window.__arAudio;
+            if (ar.ctx.state === 'suspended' && typeof ar.ctx.resume === 'function')
+                await ar.ctx.resume();
+
+            var mediaStream = ar.dest.stream;
+            var mediaTrack = mediaStream.getAudioTracks()[0];
+            if (!mediaTrack) throw new Error('no-media-track');
+            mediaTrack.enabled = true;
+
+            if (typeof JitsiMeetJS === 'undefined'
+                || typeof JitsiMeetJS.createLocalTracksFromMediaStreams !== 'function')
+                return { ok: false, error: 'no-jitsimeetjs', via: [] };
+
+            // Already using our virtual track?
+            var locals = (conference && typeof conference.getLocalTracks === 'function')
+                ? (conference.getLocalTracks() || []) : [];
+            var current = null;
+            for (var t = 0; t < locals.length; t++) {
+                if (locals[t] && typeof locals[t].getType === 'function' && locals[t].getType() === 'audio') {
+                    current = locals[t];
+                    break;
+                }
+            }
+            if (current && ar.jitsiTrack && current === ar.jitsiTrack) {
+                var viaSame = await arUnmute(app, conference);
+                return { ok: true, reused: true, via: viaSame };
+            }
+
+            var created = await JitsiMeetJS.createLocalTracksFromMediaStreams([{
+                stream: mediaStream,
+                track: mediaTrack,
+                mediaType: 'audio',
+                sourceType: 'audio',
+                videoType: undefined
+            }]);
+            var newTrack = created && created[0] ? created[0] : null;
+            if (!newTrack) return { ok: false, error: 'create-track-failed', via: [] };
+
+            if (current && typeof conference.replaceTrack === 'function') {
+                await conference.replaceTrack(current, newTrack);
+                try { if (typeof current.dispose === 'function') current.dispose(); } catch (eDisp) {}
+            } else if (typeof conference.addTrack === 'function') {
+                await conference.addTrack(newTrack);
+            }
+
+            ar.jitsiTrack = newTrack;
+            try { if (typeof newTrack.unmute === 'function') await newTrack.unmute(); } catch (eU) {}
+            var via = await arUnmute(app, conference);
+            return { ok: true, reused: false, via: via };
+        }
+        """;
+
+    /// <summary>
+    /// async function(_) — replace hardware/fake mic with silent WebAudio track, keep unmuted.
+    /// </summary>
+    private const string InstallSilentVirtualMicScript =
+        """
+        async function(_) {
+        """
+        + VirtualMicHelpersJs
+        + """
+            try {
+                var app = window.APP;
+                if (!app) return JSON.stringify({ ok: false, error: 'no-app' });
+                var conference = arGetConference(app);
+                if (!conference) return JSON.stringify({ ok: false, error: 'no-conference' });
+                var result = await arEnsureSilentMic(app, conference);
+                return JSON.stringify(result);
+            } catch (e) {
+                return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+            }
+        }
+        """;
+
+    /// <summary>
+    /// async function(_) — mute, dispose virtual mic, hang up so noise stops after process exit.
+    /// </summary>
+    private const string SilenceAndLeaveScript =
+        """
+        async function(_) {
+            var via = [];
+            try {
+                var app = window.APP;
+                try {
+                    if (window.__arAudio) {
+                        try { if (window.__arAudio.constant) window.__arAudio.constant.stop(); } catch (e1) {}
+                        try { if (window.__arAudio.ctx) await window.__arAudio.ctx.close(); } catch (e2) {}
+                        window.__arAudio = null;
+                        via.push('arAudio-closed');
+                    }
+                } catch (eAr) {}
+                try {
+                    if (app && app.conference && typeof app.conference.muteAudio === 'function') {
+                        app.conference.muteAudio(true);
+                        via.push('muteAudio(true)');
+                    }
+                } catch (eMute) {}
+                try {
+                    if (app && app.store && typeof app.store.dispatch === 'function') {
+                        app.store.dispatch({ type: 'SET_AUDIO_MUTED', muted: true });
+                        via.push('SET_AUDIO_MUTED true');
+                    }
+                } catch (eRedux) {}
+                try {
+                    if (app && app.conference && typeof app.conference.hangup === 'function') {
+                        app.conference.hangup(true);
+                        via.push('hangup');
+                    } else if (app && app.conference && typeof app.conference.leave === 'function') {
+                        app.conference.leave();
+                        via.push('leave');
+                    }
+                } catch (eLeave) {
+                    via.push('leave-error:' + String(eLeave && eLeave.message || eLeave));
+                }
+                return JSON.stringify({ ok: true, via: via });
+            } catch (e) {
+                return JSON.stringify({ ok: false, error: String(e && e.message || e) });
+            }
+        }
+        """;
+
+    /// <summary>
+    /// async function(wavBase64) — play TTS into the persistent silent virtual mic (no fake-device restore).
     /// </summary>
     private const string PublishWavToConferenceScript =
         """
         async function(wavBase64) {
-            async function unmuteMicrophone(app, conference) {
-                var via = [];
-
-                // DOM toolbox (from live dump): aria-label="Unmute microphone"
-                try {
-                    var selectors = [
-                        '[aria-label="Unmute microphone"]',
-                        '[aria-label="Unmute"]',
-                        '[aria-label*="Unmute microphone"]',
-                        '[aria-label="Включить микрофон"]',
-                        '[aria-label*="Включить микрофон"]'
-                    ];
-                    for (var s = 0; s < selectors.length; s++) {
-                        var el = document.querySelector(selectors[s]);
-                        if (el) {
-                            el.click();
-                            via.push('dom:' + selectors[s]);
-                            break;
-                        }
-                    }
-                    if (via.length === 0) {
-                        var nodes = document.querySelectorAll('[aria-label], .toolbox-button, [role="button"]');
-                        for (var n = 0; n < nodes.length; n++) {
-                            var lab = String(nodes[n].getAttribute('aria-label') || nodes[n].innerText || '').toLowerCase();
-                            if (lab.indexOf('unmute') >= 0 || lab.indexOf('включить микрофон') >= 0) {
-                                nodes[n].click();
-                                via.push('dom-scan');
-                                break;
-                            }
-                        }
-                    }
-                } catch (eDom) {}
-
-                // UI / APP helper (preferred — updates toolbar mute state).
-                try {
-                    if (app.conference && typeof app.conference.muteAudio === 'function') {
-                        app.conference.muteAudio(false);
-                        via.push('APP.conference.muteAudio(false)');
-                    }
-                } catch (e1) {}
-
-                try {
-                    if (typeof APP !== 'undefined' && APP.conference && typeof APP.conference.muteAudio === 'function') {
-                        APP.conference.muteAudio(false);
-                        via.push('muteAudio');
-                    }
-                } catch (e2) {}
-
-                // Unmute every local audio JitsiTrack.
-                try {
-                    if (conference && typeof conference.getLocalTracks === 'function') {
-                        var locals = conference.getLocalTracks() || [];
-                        for (var i = 0; i < locals.length; i++) {
-                            var tr = locals[i];
-                            if (!tr || typeof tr.getType !== 'function' || tr.getType() !== 'audio')
-                                continue;
-                            if (typeof tr.unmute === 'function') {
-                                await tr.unmute();
-                                via.push('track.unmute');
-                            }
-                            try {
-                                var mt = typeof tr.getTrack === 'function' ? tr.getTrack() : null;
-                                if (mt && mt.enabled === false)
-                                    mt.enabled = true;
-                            } catch (eMt) {}
-                        }
-                    }
-                } catch (e3) {}
-
-                // Redux audio-mute flag when present.
-                try {
-                    if (app.store && typeof app.store.dispatch === 'function') {
-                        app.store.dispatch({ type: 'SET_AUDIO_MUTED', muted: false });
-                        via.push('SET_AUDIO_MUTED');
-                    }
-                } catch (e4) {}
-
-                return via;
-            }
-
+        """
+        + VirtualMicHelpersJs
+        + """
             try {
                 if (!wavBase64 || typeof wavBase64 !== 'string')
                     return JSON.stringify({ ok: false, error: 'empty-wav' });
@@ -2070,128 +2494,44 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 if (!app)
                     return JSON.stringify({ ok: false, error: 'no-app' });
 
-                var conference = null;
-                try {
-                    if (app.store && typeof app.store.getState === 'function') {
-                        var state = app.store.getState();
-                        conference = (state['features/base/conference'] || {}).conference || null;
-                    }
-                } catch (eState) {}
-                if (!conference && app.conference && app.conference._room)
-                    conference = app.conference._room;
-
+                var conference = arGetConference(app);
                 if (!conference)
                     return JSON.stringify({ ok: false, error: 'no-conference' });
 
-                // Mic must be on before TTS audio is published.
-                var unmuteVia = await unmuteMicrophone(app, conference);
+                var mic = await arEnsureSilentMic(app, conference);
+                if (!mic || !mic.ok)
+                    return JSON.stringify({ ok: false, error: (mic && mic.error) || 'silent-mic-failed' });
+
+                var ar = window.__arAudio;
+                if (!ar || !ar.ctx || !ar.dest)
+                    return JSON.stringify({ ok: false, error: 'no-ar-audio' });
 
                 var binary = atob(wavBase64);
                 var bytes = new Uint8Array(binary.length);
                 for (var i = 0; i < binary.length; i++)
                     bytes[i] = binary.charCodeAt(i);
 
-                var Ctx = window.AudioContext || window.webkitAudioContext;
-                if (!Ctx)
-                    return JSON.stringify({ ok: false, error: 'no-audiocontext' });
-
-                var ctx = new Ctx();
-                if (ctx.state === 'suspended' && typeof ctx.resume === 'function')
-                    await ctx.resume();
-
-                var audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
-                var dest = ctx.createMediaStreamDestination();
-                var source = ctx.createBufferSource();
+                var audioBuffer = await ar.ctx.decodeAudioData(bytes.buffer.slice(0));
+                var source = ar.ctx.createBufferSource();
                 source.buffer = audioBuffer;
-                source.connect(dest);
+                source.connect(ar.dest);
 
-                var mediaStream = dest.stream;
-                var mediaTrack = mediaStream.getAudioTracks()[0];
-                if (!mediaTrack)
-                    return JSON.stringify({ ok: false, error: 'no-media-track' });
-                mediaTrack.enabled = true;
-
-                var newTrack = null;
-                var oldTrack = null;
-                var replaced = false;
-
-                if (typeof JitsiMeetJS !== 'undefined'
-                    && typeof JitsiMeetJS.createLocalTracksFromMediaStreams === 'function') {
-                    var created = await JitsiMeetJS.createLocalTracksFromMediaStreams([{
-                        stream: mediaStream,
-                        track: mediaTrack,
-                        mediaType: 'audio',
-                        sourceType: 'audio',
-                        videoType: undefined
-                    }]);
-                    newTrack = created && created[0] ? created[0] : null;
-
-                    if (newTrack && typeof conference.getLocalTracks === 'function') {
-                        var locals = conference.getLocalTracks() || [];
-                        for (var t = 0; t < locals.length; t++) {
-                            if (locals[t] && typeof locals[t].getType === 'function'
-                                && locals[t].getType() === 'audio') {
-                                oldTrack = locals[t];
-                                break;
-                            }
-                        }
-
-                        if (oldTrack && typeof conference.replaceTrack === 'function') {
-                            await conference.replaceTrack(oldTrack, newTrack);
-                            replaced = true;
-                        } else if (typeof conference.addTrack === 'function') {
-                            await conference.addTrack(newTrack);
-                            replaced = true;
-                        }
-                    }
-
-                    if (newTrack && typeof newTrack.unmute === 'function') {
-                        try { await newTrack.unmute(); } catch (eUnmute) {}
-                    }
-                }
-
-                // Ensure UI mute is still off after track swap.
-                await unmuteMicrophone(app, conference);
+                await arUnmute(app, conference);
 
                 var ended = new Promise(function (resolve) {
                     source.onended = function () { resolve(); };
                     setTimeout(resolve, Math.ceil((audioBuffer.duration + 0.75) * 1000));
                 });
-
                 source.start(0);
                 await ended;
 
-                if (replaced && newTrack) {
-                    try {
-                        if (oldTrack && typeof conference.replaceTrack === 'function')
-                            await conference.replaceTrack(newTrack, oldTrack);
-                        else if (typeof conference.removeTrack === 'function')
-                            await conference.removeTrack(newTrack);
-                    } catch (eRestore) {}
-
-                    try {
-                        if (oldTrack && typeof oldTrack.mute === 'function')
-                            await oldTrack.mute();
-                    } catch (eRemute) {}
-
-                    try {
-                        if (app.conference && typeof app.conference.muteAudio === 'function')
-                            app.conference.muteAudio(true);
-                    } catch (eMuteUi) {}
-
-                    try {
-                        if (typeof newTrack.dispose === 'function')
-                            newTrack.dispose();
-                    } catch (eDisp) {}
-                }
-
-                try { await ctx.close(); } catch (eClose) {}
+                // Stay on silent virtual mic — never restore Chrome fake/hardware capture.
+                await arUnmute(app, conference);
 
                 return JSON.stringify({
                     ok: true,
                     durationMs: Math.round(audioBuffer.duration * 1000),
-                    replaced: replaced,
-                    micUnmutedVia: unmuteVia
+                    micVia: mic.via || []
                 });
             } catch (e) {
                 return JSON.stringify({ ok: false, error: String(e && e.message || e) });

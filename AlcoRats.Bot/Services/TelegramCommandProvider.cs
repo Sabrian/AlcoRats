@@ -1,9 +1,10 @@
-﻿using AlcoRats.Bot.Core;
+﻿using System.Text;
+using AlcoRats.Bot.Core;
 using AlcoRats.Bot.Models;
 using Microsoft.Extensions.Logging;
 using Serilog;
-using System.Text;
 using Telegram.Bot;
+using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 
@@ -11,6 +12,8 @@ namespace AlcoRats.Bot.Services;
 
 class TelegramCommandProvider : ICommandProvider, IClientProvider
 {
+    private static readonly TimeSpan TransientLogInterval = TimeSpan.FromSeconds(60);
+
     private readonly MessageQueue<ICommand> _commands = new();
     private readonly Configuration _configuration;
     private readonly ILogger<TelegramCommandProvider> _logger;
@@ -18,6 +21,8 @@ class TelegramCommandProvider : ICommandProvider, IClientProvider
 
     private TelegramBotClient _client;
     private CancellationTokenSource _receiveCts;
+    private DateTime _lastTransientLogUtc = DateTime.MinValue;
+    private int _suppressedTransientErrors;
 
     public TelegramCommandProvider(Configuration configuration, ILogger<TelegramCommandProvider> logger)
     {
@@ -127,13 +132,75 @@ class TelegramCommandProvider : ICommandProvider, IClientProvider
                             ChatId = chatId,
                         });
                 },
-                (_, exception, _) =>
+                async (_, exception, ct) =>
                 {
                     // Do not recreate the client here — that causes getUpdates 409 and restart loops.
+                    // Telegram.Bot keeps polling; we only need sane logging + brief backoff on outages.
+                    if (IsTransientTelegramError(exception))
+                    {
+                        var now = DateTime.UtcNow;
+                        if (now - _lastTransientLogUtc >= TransientLogInterval)
+                        {
+                            var suppressed = Interlocked.Exchange(ref _suppressedTransientErrors, 0);
+                            _logger.LogWarning(
+                                exception,
+                                "Telegram API temporary outage ({Message}). Polling continues.{Suppressed}",
+                                exception.Message,
+                                suppressed > 0 ? $" Suppressed {suppressed} similar error(s)." : "");
+                            _lastTransientLogUtc = now;
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref _suppressedTransientErrors);
+                        }
+
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(3), ct);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // shutting down
+                        }
+
+                        return;
+                    }
+
                     _logger.LogError(exception, "Telegram receive error: {Message}", exception.Message);
                 },
                 cancellationToken: _receiveCts.Token);
         }
+    }
+
+    private static bool IsTransientTelegramError(Exception exception)
+    {
+        for (var e = exception; e != null; e = e.InnerException)
+        {
+            if (e is ApiRequestException api)
+            {
+                // 502/503/504 and similar gateway blips from api.telegram.org
+                if (api.ErrorCode is >= 500 and < 600)
+                    return true;
+                if (api.Message.Contains("Bad Gateway", StringComparison.OrdinalIgnoreCase)
+                    || api.Message.Contains("Gateway Timeout", StringComparison.OrdinalIgnoreCase)
+                    || api.Message.Contains("Service Unavailable", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            if (e is RequestException)
+                return true;
+
+            if (e is TimeoutException or TaskCanceledException or HttpRequestException or IOException)
+                return true;
+
+            var msg = e.Message ?? "";
+            if (msg.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Bad Gateway", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Gateway Timeout", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     public async Task<ICommand> Dequeue()

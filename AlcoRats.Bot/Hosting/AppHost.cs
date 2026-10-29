@@ -62,7 +62,7 @@ public static class AppHost
             services.AddSingleton<IDomSnapshotStore, NullDomSnapshotStore>();
         services.AddSingleton<PiperTtsSynthesizer>();
         services.AddSingleton<IJitsiBotService, JitsiBotService>();
-        services.AddSingleton<IAIChat, GeminiAiChat>();
+        RegisterAiChat(services, Configuration.Instance);
         services.AddSingleton<IServiceMain, ServiceMain>();
         services.AddSingleton<ICommandProcessor, CommandProcessor>();
         services.AddSingleton<ICommandProvider, TelegramCommandProvider>();
@@ -134,5 +134,29 @@ public static class AppHost
             return Path.Combine(localAppData, "AlcoRats.Bot", "logs");
 
         return Path.Combine(AppContext.BaseDirectory, "logs");
+    }
+
+    private static void RegisterAiChat(IServiceCollection services, Configuration configuration)
+    {
+        var engine = (configuration.AiEngine ?? "").Trim().ToLowerInvariant();
+        switch (engine)
+        {
+            case "gemini":
+                services.AddSingleton<IAIChat, GeminiAiChat>();
+                break;
+            case "":
+            case "empty":
+            case "none":
+            case "off":
+            case "disabled":
+                services.AddSingleton<IAIChat, EmptyAiChat>();
+                break;
+            case "openrouter":
+                services.AddSingleton<IAIChat, OpenRouterAiChat>();
+                break;
+            default:
+                throw new InvalidOperationException(
+                    $"Unknown AiEngine '{configuration.AiEngine}'. Use: openrouter | gemini | empty.");
+        }
     }
 }

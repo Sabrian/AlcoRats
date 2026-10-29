@@ -178,7 +178,9 @@ class CommandProcessor : ICommandProcessor
                 if (!string.IsNullOrEmpty(text))
                 {
                     await _jitsiBot.SendMessage($"[{command.UserName}]: {text}");
-                    await _jitsiBot.SpeakAsync(await AIChat(command.UserName, text));
+                    var reply = await AIChat(command.UserName, text);
+                    if (!string.IsNullOrWhiteSpace(reply))
+                        await _jitsiBot.SpeakAsync(reply);
                 }
                 break;
         }
@@ -186,6 +188,6 @@ class CommandProcessor : ICommandProcessor
 
     private async Task<string> AIChat(string name, string message)
     {
-        return await _aIChat.Query($"Отвечай кратко, если не попросят иначе. На следущей строке обращение участника конференции: {name}\r\n{message}");
+        return await _aIChat.Query($"Отвечай кратко, если не попросят иначе. Ответ будет озвучен. На следущей строке обращение участника конференции: {name}\r\n{message}");
     }
 }

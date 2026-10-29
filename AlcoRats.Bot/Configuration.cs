@@ -5,7 +5,7 @@ namespace AlcoRats.Bot;
 
 public class Configuration
 {
-    public string Token { get; set; } = "8886065444:AAFzZ6ioGeMBATxDwxzqBeAmyUyC1nW4QrA";
+    public string Token { get; set; } = "";
 
     public string TelegramBotName { get; set; } = "@alcoratsbot";
 
@@ -56,6 +56,11 @@ public class Configuration
     public string PiperCacheDir { get; set; } = "";
 
     /// <summary>
+    /// Which <c>IAIChat</c> implementation to register: <c>openrouter</c> | <c>gemini</c> | <c>empty</c>.
+    /// </summary>
+    public string AiEngine { get; set; } = "openrouter";
+
+    /// <summary>
     /// Gemini Developer API key (AI Studio). Prefer env <c>GEMINI_API_KEY</c> in production.
     /// </summary>
     public string GeminiApiKey { get; set; } = "";
@@ -64,6 +69,16 @@ public class Configuration
     /// Gemini model id for the free Developer API. Default: gemini-flash-latest.
     /// </summary>
     public string GeminiModel { get; set; } = "gemini-flash-latest";
+
+    /// <summary>
+    /// OpenRouter API key. Prefer env <c>OPENROUTER_API_KEY</c> / <c>OpenRouterKey</c> in production.
+    /// </summary>
+    public string OpenRouterKey { get; set; } = "";
+
+    /// <summary>
+    /// OpenRouter model id. Default: <c>openrouter/free</c> (free models router).
+    /// </summary>
+    public string OpenRouterModel { get; set; } = "openrouter/free";
 
     public static Configuration Instance { get; private set; } = null!;
 
@@ -127,5 +142,14 @@ public class Configuration
             config.GeminiApiKey = geminiKey;
         if (!string.IsNullOrWhiteSpace(Env("GeminiModel")))
             config.GeminiModel = Env("GeminiModel");
+        if (!string.IsNullOrWhiteSpace(Env("AiEngine")))
+            config.AiEngine = Env("AiEngine");
+        var openRouterKey = Env("OpenRouterKey");
+        if (string.IsNullOrWhiteSpace(openRouterKey))
+            openRouterKey = Env("OPENROUTER_API_KEY");
+        if (!string.IsNullOrWhiteSpace(openRouterKey))
+            config.OpenRouterKey = openRouterKey;
+        if (!string.IsNullOrWhiteSpace(Env("OpenRouterModel")))
+            config.OpenRouterModel = Env("OpenRouterModel");
     }
 }

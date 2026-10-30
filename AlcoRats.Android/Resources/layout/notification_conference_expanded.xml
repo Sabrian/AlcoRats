@@ -301,6 +301,16 @@
         </FrameLayout>
 
         <ImageButton
+            android:id="@+id/btn_audio"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Устройство звука"
+            android:padding="4dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_speaker" />
+
+        <ImageButton
             android:id="@+id/btn_leave"
             android:layout_width="32dp"
             android:layout_height="32dp"

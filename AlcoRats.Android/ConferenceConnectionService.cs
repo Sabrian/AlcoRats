@@ -1,10 +1,7 @@
 #nullable enable
-using AlcoRats.Hosting;
-using AlcoRats.Services;
 using Android.App;
 using Android.Content;
 using Android.Telecom;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TelecomPresentation = Android.Telecom.Presentation;
@@ -81,23 +78,15 @@ public sealed class ConferenceConnection : Connection
 
     public override void OnDisconnect()
     {
+        // Headset / system may end the self-managed Telecom call; that must NOT leave
+        // Jitsi (play/pause hotkey is mic toggle via MediaSession). Explicit hangup uses
+        // ConferenceMediaSessionService.ActionLeave → LeaveAsync.
         SetDisconnected(new DisconnectCause(Causes.Local));
         Destroy();
         if (ReferenceEquals(Current, this))
             Current = null;
 
         ConferenceTelecom.ClearCallGate();
-
-        // Hang up the WebView conference if the system ends the Telecom call.
-        try
-        {
-            var conference = AppHost.Services.GetService<IConferenceSession>();
-            _ = conference?.LeaveAsync();
-        }
-        catch
-        {
-            // DI may be unavailable during teardown.
-        }
     }
 
     public override void OnAbort()

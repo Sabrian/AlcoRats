@@ -1,11 +1,11 @@
-﻿using System.IO;
+using System.IO;
 using System.Text.Json;
 
 namespace AlcoRats.Bot;
 
 public class Configuration
 {
-    public string Token { get; set; } = "";
+    public string Token { get; set; } = "8886065444:AAFzZ6ioGeMBATxDwxzqBeAmyUyC1nW4QrA";
 
     public string TelegramBotName { get; set; } = "@alcoratsbot";
 
@@ -76,7 +76,9 @@ public class Configuration
     public string OpenRouterKey { get; set; } = "";
 
     /// <summary>
-    /// OpenRouter model id. Default: <c>openrouter/free</c> (free models router).
+    /// OpenRouter model id. Default: <c>openrouter/free</c> (free router).
+    /// Note: the free router may pick content-safety classifiers; <c>OpenRouterAiChat</c> retries with chat models.
+    /// Prefer an explicit chat model, e.g. <c>google/gemma-4-31b-it:free</c>.
     /// </summary>
     public string OpenRouterModel { get; set; } = "openrouter/free";
 

@@ -31,7 +31,7 @@ namespace AlcoRats.Android;
     // (TypePhoneCall would race PlaceCall and can SecurityException before Connection is Active).
     // stopWithTask=false is set in AndroidManifest.xml (ServiceAttribute has no StopWithTask).
     ForegroundServiceType = ForegroundService.TypeMediaPlayback | ForegroundService.TypeMicrophone)]
-[IntentFilter([Intent.ActionMediaButton, ActionToggleMic, ActionToggleCam, ActionOpenChat, ActionLeave, ActionRefresh])]
+[IntentFilter([Intent.ActionMediaButton, ActionToggleMic, ActionToggleCam, ActionOpenChat, ActionAudioRoute, ActionLeave, ActionRefresh])]
 public sealed class ConferenceMediaSessionService : Service
 {
     /// <summary>High-importance call channel (Default channel kept for older installs).</summary>
@@ -41,6 +41,7 @@ public sealed class ConferenceMediaSessionService : Service
     public const string ActionToggleMic = "com.alcorats.app.ACTION_TOGGLE_MIC";
     public const string ActionToggleCam = "com.alcorats.app.ACTION_TOGGLE_CAM";
     public const string ActionOpenChat = "com.alcorats.app.ACTION_OPEN_CHAT";
+    public const string ActionAudioRoute = "com.alcorats.app.ACTION_AUDIO_ROUTE";
     public const string ActionLeave = "com.alcorats.app.ACTION_LEAVE";
     public const string ActionRefresh = "com.alcorats.app.ACTION_REFRESH";
 
@@ -70,6 +71,7 @@ public sealed class ConferenceMediaSessionService : Service
     /// notification <c>when</c>; refreshing with "now" makes the shade jump 00:00↔00:01.
     /// </summary>
     private long _callStartedAtMs;
+    private bool _isForegroundPosted;
     private static readonly object ToneLock = new();
     private Java.Lang.IRunnable? _clearMicPendingRunnable;
     private Java.Lang.IRunnable? _clearCamPendingRunnable;
@@ -144,6 +146,9 @@ public sealed class ConferenceMediaSessionService : Service
             case ActionOpenChat:
                 TryOpenChat();
                 break;
+            case ActionAudioRoute:
+                OpenAudioRoutePicker();
+                break;
             case ActionLeave:
                 ClearPending(mic: true, cam: true);
                 _ = _conference?.LeaveAsync();
@@ -199,6 +204,7 @@ public sealed class ConferenceMediaSessionService : Service
     private void ReleaseKeepAlive()
     {
         ConferenceTelecom.SyncWithConference(this, ConferenceSessionState.Inactive);
+        ConferenceAudio.ClearOverride(this);
         ConferenceWakeLock.Release();
     }
 
@@ -430,7 +436,19 @@ public sealed class ConferenceMediaSessionService : Service
         }
 
         var handler = new Handler(Looper.MainLooper!);
-        handler.Post(() => PublishForeground(state));
+        handler.Post(() =>
+        {
+            // Prefetch can finish after hangup — never re-post CallStyle for a stale snapshot.
+            var current = _conference?.State ?? _lastState;
+            if (!current.IsActive)
+            {
+                if (_isForegroundPosted)
+                    PublishForeground(ConferenceSessionState.Inactive);
+                return;
+            }
+
+            PublishForeground(current);
+        });
     }
 
     private void PublishForeground(ConferenceSessionState state)
@@ -447,9 +465,28 @@ public sealed class ConferenceMediaSessionService : Service
             _callStartedAtMs = Java.Lang.JavaSystem.CurrentTimeMillis();
 
         AcquireKeepAlive(state);
-        var notification = BuildNotification(state);
-        StartForegroundWith(notification);
-        NotificationManagerCompat.From(this)?.Notify(NotificationId, notification);
+        // CallStyle must be posted via StartForeground only — NotificationManager.Notify
+        // throws IllegalArgumentException on API 34+ ("must be for a foreground service").
+        try
+        {
+            var notification = BuildNotification(state, useCallStyle: true);
+            StartForegroundWith(notification);
+            _isForegroundPosted = true;
+        }
+        catch (Java.Lang.RuntimeException ex)
+        {
+            global::Android.Util.Log.Warn("AlcoRats", "CallStyle StartForeground failed, falling back: " + ex.Message);
+            try
+            {
+                var fallback = BuildNotification(state, useCallStyle: false);
+                StartForegroundWith(fallback);
+                _isForegroundPosted = true;
+            }
+            catch (Java.Lang.RuntimeException ex2)
+            {
+                global::Android.Util.Log.Error("AlcoRats", "Foreground notification failed: " + ex2.Message);
+            }
+        }
     }
 
     /// <summary>Satisfy StartForegroundService contract when we are about to stop without a call.</summary>
@@ -487,6 +524,7 @@ public sealed class ConferenceMediaSessionService : Service
 
     private void DismissShade()
     {
+        _isForegroundPosted = false;
         try
         {
             if (global::System.OperatingSystem.IsAndroidVersionAtLeast(24))
@@ -571,7 +609,7 @@ public sealed class ConferenceMediaSessionService : Service
         manager?.CreateNotificationChannel(channel);
     }
 
-    private Notification BuildNotification(ConferenceSessionState state)
+    private Notification BuildNotification(ConferenceSessionState state, bool useCallStyle = true)
     {
         var launchIntent = new Intent(this, typeof(MainActivity));
         launchIntent.SetFlags(ActivityFlags.SingleTop | ActivityFlags.ClearTop);
@@ -605,23 +643,24 @@ public sealed class ConferenceMediaSessionService : Service
             names = "Вы в конференции";
 
         // API 31+: CallStyle ranks as an ongoing call (stronger against OEM kills).
-        // Custom RemoteViews are incompatible with CallStyle — use them below S.
-        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
+        // Custom RemoteViews are incompatible with CallStyle — use them below S / on fallback.
+        if (useCallStyle && global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
         {
             var person = new AndroidX.Core.App.Person.Builder()
                 .SetName("AlcoRats")!
                 .SetImportant(true)!
                 .Build()!;
             var callStyle = NotificationCompat.CallStyle.ForOngoingCall(person, hangupIntent)!;
+            // CallStyle allows hangup + at most ONE custom action (3rd throws IllegalArgumentException).
             return builder
                 .SetContentTitle("Конференция")!
                 .SetContentText(names)!
                 .SetStyle(callStyle)!
                 .AddPerson(person)!
                 .AddAction(new NotificationCompat.Action(
-                    state.AudioMuted ? Resource.Drawable.ic_mic_off : Resource.Drawable.ic_mic,
-                    state.AudioMuted ? "Микрофон" : "Выкл. микрофон",
-                    CreateActionPendingIntent(ActionToggleMic, 41)))!
+                    state.AudioMuted ? Resource.Drawable.ic_mic_off : Resource.Drawable.ic_speaker,
+                    "Ещё",
+                    CreateCallActionsPendingIntent(41)))!
                 .Build()!;
         }
 
@@ -746,7 +785,44 @@ public sealed class ConferenceMediaSessionService : Service
         views.SetOnClickPendingIntent(Resource.Id.btn_mic, CreateActionPendingIntent(ActionToggleMic, 11));
         views.SetOnClickPendingIntent(Resource.Id.btn_cam, CreateActionPendingIntent(ActionToggleCam, 12));
         views.SetOnClickPendingIntent(Resource.Id.btn_chat, CreateActionPendingIntent(ActionOpenChat, 14));
+        views.SetOnClickPendingIntent(Resource.Id.btn_audio, CreateAudioRoutePendingIntent(15));
         views.SetOnClickPendingIntent(Resource.Id.btn_leave, CreateActionPendingIntent(ActionLeave, 13));
+    }
+
+    private void OpenAudioRoutePicker()
+    {
+        try
+        {
+            var intent = new Intent(this, typeof(AudioRoutePickerActivity));
+            intent.AddFlags(ActivityFlags.NewTask | ActivityFlags.ClearTop | ActivityFlags.NoUserAction);
+            StartActivity(intent);
+        }
+        catch (Exception ex)
+        {
+            global::Android.Util.Log.Warn("AlcoRats", "Audio route picker failed: " + ex.Message);
+        }
+    }
+
+    private PendingIntent CreateCallActionsPendingIntent(int requestCode)
+    {
+        var intent = new Intent(this, typeof(ConferenceCallActionsActivity));
+        intent.AddFlags(ActivityFlags.NewTask | ActivityFlags.ClearTop);
+        return PendingIntent.GetActivity(
+            this,
+            requestCode,
+            intent,
+            PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable)!;
+    }
+
+    private PendingIntent CreateAudioRoutePendingIntent(int requestCode)
+    {
+        var intent = new Intent(this, typeof(AudioRoutePickerActivity));
+        intent.AddFlags(ActivityFlags.NewTask | ActivityFlags.ClearTop);
+        return PendingIntent.GetActivity(
+            this,
+            requestCode,
+            intent,
+            PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable)!;
     }
 
     private static string TruncateName(string? name)
@@ -943,6 +1019,16 @@ public sealed class ConferenceMediaSessionService : Service
     {
         var intent = new Intent(context, typeof(ConferenceMediaSessionService));
         intent.SetAction(ActionToggleMic);
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(26))
+            context.StartForegroundService(intent);
+        else
+            context.StartService(intent);
+    }
+
+    public static void RequestRefresh(Context context)
+    {
+        var intent = new Intent(context, typeof(ConferenceMediaSessionService));
+        intent.SetAction(ActionRefresh);
         if (global::System.OperatingSystem.IsAndroidVersionAtLeast(26))
             context.StartForegroundService(intent);
         else

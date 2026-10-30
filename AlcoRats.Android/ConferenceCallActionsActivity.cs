@@ -64,11 +64,33 @@ public sealed class ConferenceCallActionsActivity : Activity
                 {
                     var routeIndex = index - 1;
                     if (routeIndex >= 0 && routeIndex < routes.Count)
-                        ConferenceAudio.Select(this, routes[routeIndex]);
-                    ConferenceMediaSessionService.RequestRefresh(this);
+                    {
+                        var result = ConferenceAudio.SelectDetailed(this, routes[routeIndex], showToast: true);
+                        ConferenceMediaSessionService.RequestRefresh(this);
+                        if (!result.Ok)
+                        {
+                            new AlertDialog.Builder(this)
+                                .SetTitle(result.Summary)!
+                                .SetMessage(result.Details + "\n" + ConferenceAudio.DumpDiagnostics(this))!
+                                .SetPositiveButton("OK", (_, _) => Finish())!
+                                .SetOnCancelListener(new CancelListener(Finish))!
+                                .Show();
+                            return;
+                        }
+                    }
+                    else
+                        ConferenceMediaSessionService.RequestRefresh(this);
                 }
 
                 Finish();
+            })!
+            .SetNeutralButton("Диагностика", (_, _) =>
+            {
+                new AlertDialog.Builder(this)
+                    .SetTitle("Аудио диагностика")!
+                    .SetMessage(ConferenceAudio.DumpDiagnostics(this))!
+                    .SetPositiveButton("OK", (_, _) => Finish())!
+                    .Show();
             })!
             .SetNegativeButton("Отмена", (_, _) => Finish())!
             .SetOnCancelListener(new CancelListener(Finish))!

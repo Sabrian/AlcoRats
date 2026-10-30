@@ -5,7 +5,7 @@ namespace AlcoRats.Bot;
 
 public class Configuration
 {
-    public string Token { get; set; } = "8886065444:AAFzZ6ioGeMBATxDwxzqBeAmyUyC1nW4QrA";
+    public string Token { get; set; } = "";
 
     public string TelegramBotName { get; set; } = "@alcoratsbot";
 

@@ -1,4 +1,5 @@
 using AlcoRats.Hosting;
+using AlcoRats.Services;
 using AlcoRats.Services.Speech;
 using Android.App;
 using Android.Runtime;
@@ -20,6 +21,8 @@ public class Application : AvaloniaAndroidApplication<App>
     {
         WebViewMediaPermissionBridge.Register();
         CrashUi.Register();
+        // Route notification audio-device picks into the Jitsi WebView as well as AudioManager.
+        ConferenceAudio.WebAudioOutputHint = hint => WebViewPlatformSetup.RequestAudioOutput?.Invoke(hint);
 
         AppHost.Initialize(services =>
         {

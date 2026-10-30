@@ -252,7 +252,7 @@ public partial class MainView : UserControl
     private const string BridgeScript = """
         (function () {
           // Bump version to reinstall after fixes.
-          if (window.__alcoRatsBridgeVersion === 38) {
+          if (window.__alcoRatsBridgeVersion === 39) {
             try {
               if (typeof window.__alcoRatsFillCredentials === 'function')
                 window.__alcoRatsFillCredentials();
@@ -265,7 +265,7 @@ public partial class MainView : UserControl
             } catch (eEx) {}
             return 'exists';
           }
-          window.__alcoRatsBridgeVersion = 38;
+          window.__alcoRatsBridgeVersion = 39;
           if (window.__alcoRatsBridgeTimer) clearInterval(window.__alcoRatsBridgeTimer);
           if (window.__alcoRatsPasswordTimer) clearInterval(window.__alcoRatsPasswordTimer);
           if (window.__alcoRatsUiFixTimer) {
@@ -1245,6 +1245,64 @@ public partial class MainView : UserControl
             }
           } catch (eHook) {}
 
+          // hint: earpiece | speaker | wired | bluetooth | usb | other
+          window.__alcoRatsSetAudioOutput = function (hint) {
+            try {
+              hint = String(hint || '').toLowerCase();
+              function matchDevice(info) {
+                var label = ((info && info.label) || '').toLowerCase();
+                var kind = ((info && info.kind) || '').toLowerCase();
+                if (kind && kind.indexOf('audiooutput') < 0) return false;
+                if (hint === 'speaker')
+                  return label.indexOf('speaker') >= 0 || label.indexOf('динамик') >= 0
+                    || label.indexOf('громк') >= 0;
+                if (hint === 'earpiece')
+                  return label.indexOf('earpiece') >= 0 || label.indexOf('труб') >= 0
+                    || label.indexOf('phone') >= 0 || label.indexOf('receiver') >= 0;
+                if (hint === 'bluetooth')
+                  return label.indexOf('bluetooth') >= 0 || label.indexOf('headset') >= 0;
+                if (hint === 'wired' || hint === 'usb')
+                  return label.indexOf('wired') >= 0 || label.indexOf('headphone') >= 0
+                    || label.indexOf('usb') >= 0 || label.indexOf('гарнитур') >= 0;
+                return false;
+              }
+              function applySink(deviceId) {
+                if (!deviceId) return;
+                try {
+                  document.querySelectorAll('audio, video').forEach(function (el) {
+                    try {
+                      if (typeof el.setSinkId === 'function')
+                        el.setSinkId(deviceId).catch(function () {});
+                    } catch (eEl) {}
+                  });
+                } catch (eAll) {}
+                try {
+                  if (typeof APP !== 'undefined' && APP.conference) {
+                    if (typeof APP.conference.setAudioOutputDevice === 'function')
+                      APP.conference.setAudioOutputDevice(deviceId);
+                    else if (typeof APP.conference.setAudioOutput === 'function')
+                      APP.conference.setAudioOutput(deviceId);
+                  }
+                } catch (eJ) {}
+              }
+              if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function')
+                return 'no-enumerate';
+              navigator.mediaDevices.enumerateDevices().then(function (devices) {
+                var outputs = (devices || []).filter(function (d) { return d && d.kind === 'audiooutput'; });
+                var hit = null;
+                for (var i = 0; i < outputs.length; i++) {
+                  if (matchDevice(outputs[i])) { hit = outputs[i]; break; }
+                }
+                if (!hit && hint === 'speaker' && outputs.length)
+                  hit = outputs[0];
+                if (hit) applySink(hit.deviceId);
+              }).catch(function () {});
+              return 'ok';
+            } catch (e) {
+              return 'fail';
+            }
+          };
+
           window.__alcoRatsReleaseLocalMedia = function () {
             try {
               function stopStream(stream) {
@@ -1561,6 +1619,7 @@ public partial class MainView : UserControl
             _leaveHandler,
             _openChatHandler);
         _conference.StateChanged += OnConferenceSessionStateChanged;
+        WebViewPlatformSetup.RequestAudioOutput = OnPlatformAudioOutputRequested;
         UpdateConferenceActionButton(_conference.State.IsActive);
         // Stay on lightweight home until GoLive — do not create/navigate WebView here.
         if (_onHomeScreen)
@@ -1570,12 +1629,25 @@ public partial class MainView : UserControl
     private void OnDetachedFromVisualTree(object sender, VisualTreeAttachmentEventArgs e)
     {
         _conference.StateChanged -= OnConferenceSessionStateChanged;
+        if (ReferenceEquals(WebViewPlatformSetup.RequestAudioOutput, (Action<string>)OnPlatformAudioOutputRequested))
+            WebViewPlatformSetup.RequestAudioOutput = null;
         _conference.Unregister(
             _toggleMicrophoneHandler,
             _toggleCameraHandler,
             _leaveHandler,
             _openChatHandler);
         _bridgeInstalled = false;
+    }
+
+    private void OnPlatformAudioOutputRequested(string hint)
+    {
+        if (_onHomeScreen || RoomWebView is null || string.IsNullOrWhiteSpace(hint))
+            return;
+
+        var safe = hint.Replace("\\", "\\\\").Replace("'", "\\'");
+        _ = RunScriptAsync(
+            "(function(){try{if(typeof window.__alcoRatsSetAudioOutput==='function')return window.__alcoRatsSetAudioOutput('"
+            + safe + "');}catch(e){}return 'no';})()");
     }
 
     private void OnConferenceSessionStateChanged(ConferenceSessionState state)

@@ -32,7 +32,7 @@ public sealed class AudioRoutePickerActivity : Activity
         {
             new AlertDialog.Builder(this)
                 .SetTitle("Устройство звука")!
-                .SetMessage("Нет доступных устройств вывода.")!
+                .SetMessage("Нет доступных устройств.\n\n" + ConferenceAudio.DumpDiagnostics(this))!
                 .SetPositiveButton("OK", (_, _) => Finish())!
                 .SetOnCancelListener(new CancelListener(Finish))!
                 .Show();
@@ -51,12 +51,35 @@ public sealed class AudioRoutePickerActivity : Activity
             .SetItems(labels, (_, args) =>
             {
                 var index = args.Which;
-                if (index >= 0 && index < routes.Count)
+                if (index < 0 || index >= routes.Count)
                 {
-                    ConferenceAudio.Select(this, routes[index]);
-                    ConferenceMediaSessionService.RequestRefresh(this);
+                    Finish();
+                    return;
                 }
+
+                var result = ConferenceAudio.SelectDetailed(this, routes[index], showToast: true);
+                ConferenceMediaSessionService.RequestRefresh(this);
+
+                if (!result.Ok)
+                {
+                    new AlertDialog.Builder(this)
+                        .SetTitle(result.Summary)!
+                        .SetMessage(result.Details + "\n" + ConferenceAudio.DumpDiagnostics(this))!
+                        .SetPositiveButton("OK", (_, _) => Finish())!
+                        .SetOnCancelListener(new CancelListener(Finish))!
+                        .Show();
+                    return;
+                }
+
                 Finish();
+            })!
+            .SetNeutralButton("Диагностика", (_, _) =>
+            {
+                new AlertDialog.Builder(this)
+                    .SetTitle("Аудио диагностика")!
+                    .SetMessage(ConferenceAudio.DumpDiagnostics(this))!
+                    .SetPositiveButton("OK", (_, _) => Finish())!
+                    .Show();
             })!
             .SetNegativeButton("Отмена", (_, _) => Finish())!
             .SetOnCancelListener(new CancelListener(Finish))!

@@ -2,9 +2,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using Android.Content;
 using Android.Media;
 using Android.OS;
+using Android.Widget;
 
 namespace AlcoRats.Android;
 
@@ -14,6 +16,8 @@ namespace AlcoRats.Android;
 /// </summary>
 public static class ConferenceAudio
 {
+    public const string LogTag = "AlcoRats.Audio";
+
     public enum RouteKind
     {
         Earpiece,
@@ -25,6 +29,14 @@ public static class ConferenceAudio
     }
 
     public sealed record RouteOption(string Key, string Label, RouteKind Kind, AudioDeviceInfo? Device);
+
+    public sealed record SelectResult(bool Ok, string Summary, string Details);
+
+    /// <summary>
+    /// Optional hook (MainView) to also steer Chromium/WebRTC via setSinkId / Jitsi APIs.
+    /// Argument is a coarse kind: earpiece | speaker | wired | bluetooth | other.
+    /// </summary>
+    public static Action<string>? WebAudioOutputHint { get; set; }
 
     public static IReadOnlyList<RouteOption> ListRoutes(Context context)
     {
@@ -72,26 +84,124 @@ public static class ConferenceAudio
     }
 
     public static bool Select(Context context, RouteOption option)
+        => SelectDetailed(context, option, showToast: false).Ok;
+
+    public static SelectResult SelectDetailed(Context context, RouteOption option, bool showToast = true)
     {
         var audio = GetAudioManager(context);
         if (audio is null)
-            return false;
+            return Fail(context, showToast, "AudioManager=null", "");
 
+        var before = Snapshot(audio);
         EnsureCommunicationMode(audio);
 
-        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31) && option.Device is not null)
+        var modernOk = false;
+        var legacyOk = false;
+        var modernNote = "skipped";
+        var legacyNote = "skipped";
+
+        // Prefer a fresh device handle — stale AudioDeviceInfo from the dialog list often fails.
+        AudioDeviceInfo? target = null;
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
         {
-            try
+            target = FindFreshDevice(audio, option);
+            if (target is not null)
             {
-                return audio.SetCommunicationDevice(option.Device);
+                try
+                {
+                    modernOk = audio.SetCommunicationDevice(target);
+                    modernNote = $"SetCommunicationDevice(type={(int)target.Type}, id={target.Id}) → {modernOk}";
+                }
+                catch (Exception ex)
+                {
+                    modernNote = "SetCommunicationDevice EX: " + ex.GetType().Name + ": " + ex.Message;
+                }
             }
-            catch
+            else
             {
-                return false;
+                modernNote = "no fresh device for " + option.Key;
             }
         }
 
-        return SelectLegacy(audio, option.Kind);
+        // Always mirror with legacy flags — WebRTC/WebView often follows SpeakerphoneOn more reliably.
+        legacyOk = SelectLegacy(audio, option.Kind);
+        legacyNote = $"legacy({option.Kind}) → {legacyOk}; speaker={SafeSpeaker(audio)}; sco={SafeSco(audio)}";
+
+        try
+        {
+            WebAudioOutputHint?.Invoke(KindHint(option.Kind));
+        }
+        catch (Exception ex)
+        {
+            global::Android.Util.Log.Warn(LogTag, "WebAudioOutputHint failed: " + ex.Message);
+        }
+
+        var after = Snapshot(audio);
+        var ok = modernOk || legacyOk;
+        var summary = ok
+            ? $"OK → {CurrentLabel(context)}"
+            : "Не переключилось";
+        var details = new StringBuilder()
+            .AppendLine("want: " + option.Label + " (" + option.Kind + ")")
+            .AppendLine("before: " + before)
+            .AppendLine(modernNote)
+            .AppendLine(legacyNote)
+            .AppendLine("after: " + after)
+            .AppendLine("mode: " + audio.Mode)
+            .ToString();
+
+        global::Android.Util.Log.Info(LogTag, summary + " | " + details.Replace('\n', ' | '));
+
+        if (showToast)
+        {
+            try
+            {
+                Toast.MakeText(context, summary, ToastLength.Long)?.Show();
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        return new SelectResult(ok, summary, details);
+    }
+
+    public static string DumpDiagnostics(Context context)
+    {
+        var audio = GetAudioManager(context);
+        if (audio is null)
+            return "AudioManager=null";
+
+        var sb = new StringBuilder();
+        sb.AppendLine("mode=" + audio.Mode);
+        sb.AppendLine("snapshot=" + Snapshot(audio));
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
+        {
+            try
+            {
+                var cur = audio.CommunicationDevice;
+                sb.AppendLine(cur is null
+                    ? "communicationDevice=null"
+                    : $"communicationDevice type={(int)cur.Type} id={cur.Id} label={LabelFor(cur)}");
+                var available = audio.AvailableCommunicationDevices;
+                sb.AppendLine("available=" + (available?.Count ?? 0));
+                if (available is not null)
+                {
+                    foreach (var d in available)
+                    {
+                        if (d is null) continue;
+                        sb.AppendLine($"  - type={(int)d.Type} id={d.Id} sink={d.IsSink} {LabelFor(d)}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("modern dump EX: " + ex.Message);
+            }
+        }
+
+        return sb.ToString();
     }
 
     public static void ClearOverride(Context context)
@@ -105,6 +215,52 @@ public static class ConferenceAudio
             try { audio.ClearCommunicationDevice(); }
             catch { /* ignore */ }
         }
+    }
+
+    private static SelectResult Fail(Context context, bool showToast, string summary, string details)
+    {
+        global::Android.Util.Log.Warn(LogTag, summary + " " + details);
+        if (showToast)
+        {
+            try { Toast.MakeText(context, summary, ToastLength.Long)?.Show(); }
+            catch { /* ignore */ }
+        }
+
+        return new SelectResult(false, summary, details);
+    }
+
+    private static AudioDeviceInfo? FindFreshDevice(AudioManager audio, RouteOption option)
+    {
+        try
+        {
+            var available = audio.AvailableCommunicationDevices;
+            if (available is null)
+                return option.Device;
+
+            if (option.Device is not null)
+            {
+                foreach (var d in available)
+                {
+                    if (d is not null && d.Id == option.Device.Id && d.Type == option.Device.Type)
+                        return d;
+                }
+            }
+
+            // Match by kind if id vanished.
+            foreach (var d in available)
+            {
+                if (d is null || !d.IsSink)
+                    continue;
+                if (KindFor(d) == option.Kind)
+                    return d;
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return option.Device;
     }
 
     private static IReadOnlyList<RouteOption> ListRoutesModern(AudioManager audio)
@@ -136,7 +292,6 @@ public static class ConferenceAudio
             list.Add(new RouteOption(key, label, kind, device));
         }
 
-        // Prefer a stable order: earpiece, wired, bt, speaker, rest.
         return list
             .OrderBy(r => r.Kind switch
             {
@@ -223,6 +378,58 @@ public static class ConferenceAudio
         }
     }
 
+    private static string Snapshot(AudioManager audio)
+    {
+        var comm = "?";
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
+        {
+            try
+            {
+                var d = audio.CommunicationDevice;
+                comm = d is null ? "null" : $"{LabelFor(d)}(t={(int)d.Type},id={d.Id})";
+            }
+            catch (Exception ex)
+            {
+                comm = "err:" + ex.Message;
+            }
+        }
+
+        return $"comm={comm}; speaker={SafeSpeaker(audio)}; sco={SafeSco(audio)}";
+    }
+
+    private static bool SafeSpeaker(AudioManager audio)
+    {
+        try
+        {
+#pragma warning disable CS0618
+            return audio.SpeakerphoneOn;
+#pragma warning restore CS0618
+        }
+        catch { return false; }
+    }
+
+    private static bool SafeSco(AudioManager audio)
+    {
+        try
+        {
+#pragma warning disable CS0618
+            return audio.BluetoothScoOn;
+#pragma warning restore CS0618
+        }
+        catch { return false; }
+    }
+
+    private static string KindHint(RouteKind kind)
+        => kind switch
+        {
+            RouteKind.Earpiece => "earpiece",
+            RouteKind.Speaker => "speaker",
+            RouteKind.Wired => "wired",
+            RouteKind.Bluetooth => "bluetooth",
+            RouteKind.Usb => "usb",
+            _ => "other"
+        };
+
     private static AudioManager? GetAudioManager(Context context)
         => context.GetSystemService(Context.AudioService) as AudioManager;
 
@@ -249,7 +456,6 @@ public static class ConferenceAudio
 
     private static string LabelFor(AudioDeviceInfo device)
     {
-        // Built-in routes: always Russian (ProductName is often English "Speaker").
         var kind = KindFor(device);
         if (kind is RouteKind.Earpiece or RouteKind.Speaker)
             return kind == RouteKind.Speaker ? "Громкая связь" : "Трубка";

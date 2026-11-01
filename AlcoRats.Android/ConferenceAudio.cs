@@ -6,6 +6,7 @@ using System.Text;
 using Android.Content;
 using Android.Media;
 using Android.OS;
+using Android.Telecom;
 using Android.Widget;
 
 namespace AlcoRats.Android;
@@ -58,6 +59,57 @@ public static class ConferenceAudio
         if (audio is null)
             return "Звук";
 
+        // Prefer Telecom route while a self-managed call is up — CommunicationDevice often lags.
+        try
+        {
+            var connection = ConferenceConnection.Current;
+            if (connection is not null)
+            {
+#pragma warning disable CS0618
+                var state = connection.CallAudioState;
+#pragma warning restore CS0618
+                if (state is not null)
+                {
+                    if (state.Route == CallAudioRoute.Speaker)
+                        return "Громкая связь";
+                    if (state.Route == CallAudioRoute.Bluetooth)
+                        return "Bluetooth";
+                    if (state.Route == CallAudioRoute.WiredHeadset)
+                        return "Гарнитура";
+                    if (state.Route == CallAudioRoute.Earpiece)
+                        return "Трубка";
+                }
+
+                if (global::System.OperatingSystem.IsAndroidVersionAtLeast(34))
+                {
+                    var ep = connection.CurrentCallEndpoint;
+                    if (ep is not null)
+                    {
+                        if (ep.EndpointType == CallEndpointType.Speaker)
+                            return "Громкая связь";
+                        if (ep.EndpointType == CallEndpointType.Bluetooth)
+                            return "Bluetooth";
+                        if (ep.EndpointType == CallEndpointType.WiredHeadset)
+                            return "Гарнитура";
+                        if (ep.EndpointType == CallEndpointType.Earpiece)
+                            return "Трубка";
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Fall through.
+        }
+
+#pragma warning disable CS0618
+        // SpeakerphoneOn is more trustworthy than a stale CommunicationDevice=earpiece.
+        if (audio.SpeakerphoneOn)
+            return "Громкая связь";
+        if (audio.BluetoothScoOn)
+            return "Bluetooth";
+#pragma warning restore CS0618
+
         if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
         {
             try
@@ -73,10 +125,6 @@ public static class ConferenceAudio
         }
 
 #pragma warning disable CS0618
-        if (audio.SpeakerphoneOn)
-            return "Громкая связь";
-        if (audio.BluetoothScoOn)
-            return "Bluetooth";
         if (audio.WiredHeadsetOn)
             return "Гарнитура";
 #pragma warning restore CS0618
@@ -94,13 +142,22 @@ public static class ConferenceAudio
 
         var before = Snapshot(audio);
         EnsureCommunicationMode(audio);
+        RequestVoiceFocus(audio);
 
+        // 1) Telecom Connection owns the route while self-managed call is active.
+        //    AudioManager alone reports success but CommunicationDevice stays on earpiece.
+        var telecomOk = false;
+        var telecomNote = "no active ConferenceConnection";
+        var connection = ConferenceConnection.Current;
+        if (connection is not null)
+            telecomOk = connection.TrySetAudioRoute(option.Kind, out telecomNote);
+
+        // 2) AudioManager modern + legacy (helps WebRTC / when Telecom is absent).
         var modernOk = false;
         var legacyOk = false;
         var modernNote = "skipped";
         var legacyNote = "skipped";
 
-        // Prefer a fresh device handle — stale AudioDeviceInfo from the dialog list often fails.
         AudioDeviceInfo? target = null;
         if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
         {
@@ -123,10 +180,10 @@ public static class ConferenceAudio
             }
         }
 
-        // Always mirror with legacy flags — WebRTC/WebView often follows SpeakerphoneOn more reliably.
         legacyOk = SelectLegacy(audio, option.Kind);
         legacyNote = $"legacy({option.Kind}) → {legacyOk}; speaker={SafeSpeaker(audio)}; sco={SafeSco(audio)}";
 
+        // 3) WebView / Jitsi setSinkId hint.
         try
         {
             WebAudioOutputHint?.Invoke(KindHint(option.Kind));
@@ -137,26 +194,30 @@ public static class ConferenceAudio
         }
 
         var after = Snapshot(audio);
-        var ok = modernOk || legacyOk;
+        var telecomState = connection?.DescribeAudioState() ?? "n/a";
+        var ok = telecomOk || modernOk || legacyOk;
         var summary = ok
-            ? $"OK → {CurrentLabel(context)}"
+            ? $"OK → want {option.Label}"
             : "Не переключилось";
         var details = new StringBuilder()
             .AppendLine("want: " + option.Label + " (" + option.Kind + ")")
             .AppendLine("before: " + before)
+            .AppendLine("telecom: " + telecomNote)
+            .AppendLine("telecomState: " + telecomState)
             .AppendLine(modernNote)
             .AppendLine(legacyNote)
             .AppendLine("after: " + after)
+            .AppendLine("labelNow: " + CurrentLabel(context))
             .AppendLine("mode: " + audio.Mode)
             .ToString();
 
-        global::Android.Util.Log.Info(LogTag, summary + " | " + details.Replace('\n', ' | '));
+        global::Android.Util.Log.Info(LogTag, summary + " | " + details.Replace("\n", " | "));
 
         if (showToast)
         {
             try
             {
-                Toast.MakeText(context, summary, ToastLength.Long)?.Show();
+                Toast.MakeText(context, summary + " / now " + CurrentLabel(context), ToastLength.Long)?.Show();
             }
             catch
             {
@@ -176,6 +237,8 @@ public static class ConferenceAudio
         var sb = new StringBuilder();
         sb.AppendLine("mode=" + audio.Mode);
         sb.AppendLine("snapshot=" + Snapshot(audio));
+        sb.AppendLine("label=" + CurrentLabel(context));
+        sb.AppendLine("telecom=" + (ConferenceConnection.Current?.DescribeAudioState() ?? "no connection"));
         if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
         {
             try
@@ -202,6 +265,35 @@ public static class ConferenceAudio
         }
 
         return sb.ToString();
+    }
+
+    private static void RequestVoiceFocus(AudioManager audio)
+    {
+        try
+        {
+            if (global::System.OperatingSystem.IsAndroidVersionAtLeast(26))
+            {
+                var attrs = new AudioAttributes.Builder()!
+                    .SetUsage(AudioUsageKind.VoiceCommunication)!
+                    .SetContentType(AudioContentType.Speech)!
+                    .Build()!;
+                var req = new AudioFocusRequestClass.Builder(AudioFocus.GainTransientMayDuck)!
+                    .SetAudioAttributes(attrs)!
+                    .SetAcceptsDelayedFocusGain(true)!
+                    .Build()!;
+                audio.RequestAudioFocus(req);
+            }
+            else
+            {
+#pragma warning disable CS0618
+                audio.RequestAudioFocus(null, Stream.VoiceCall, AudioFocus.GainTransientMayDuck);
+#pragma warning restore CS0618
+            }
+        }
+        catch
+        {
+            // Best-effort.
+        }
     }
 
     public static void ClearOverride(Context context)

@@ -2,7 +2,6 @@
 using System;
 using AlcoRats.Services;
 using Android.Content;
-using Android.OS;
 using Android.Telecom;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -10,16 +9,20 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace AlcoRats.Android;
 
 /// <summary>
-/// Self-managed Telecom account: registers a PhoneAccount and places/ends a call
-/// while the Jitsi conference is active so OEMs treat the app as an ongoing VoIP call.
+/// Telecom PhoneAccount registration and leftover Connection teardown.
+/// We do <b>not</b> PlaceCall while in a Jitsi room: an active self-managed Connection
+/// makes OEMs map headset short-press to hangup (Bluetooth/SCO renegotiation) and
+/// steals the event from MediaSession. Keep-alive is CallStyle FGS + MediaSession;
+/// audio routes use AudioManager.
 /// </summary>
 public static class ConferenceTelecom
 {
     public const string PhoneAccountId = "alcorats_conference";
     private static readonly object Gate = new();
     private static bool _accountRegistered;
-    /// <summary>True after PlaceCall until we disconnect or the place attempt fails.</summary>
-    private static bool _placeCallInFlightOrActive;
+
+    /// <summary>True while we intentionally tear down Telecom (leave / inactive sync).</summary>
+    public static bool IsEndingCall { get; private set; }
 
     public static ComponentName ConnectionServiceComponent(Context context)
         => new(context, Java.Lang.Class.FromType(typeof(ConferenceConnectionService)));
@@ -64,7 +67,7 @@ public static class ConferenceTelecom
         }
     }
 
-    /// <summary>Places a self-managed outgoing call when the conference becomes active.</summary>
+    /// <summary>Drops any leftover Connection so headset buttons reach MediaSession.</summary>
     public static void SyncWithConference(Context context, ConferenceSessionState state, ILogger? logger = null)
     {
         logger ??= NullLogger.Instance;
@@ -77,10 +80,7 @@ public static class ConferenceTelecom
         {
             try
             {
-                if (state.IsActive)
-                    PlaceCallIfNeeded(context, logger);
-                else
-                    EndCallIfNeeded(logger);
+                EndCallIfNeeded(logger);
             }
             catch (Exception ex)
             {
@@ -89,65 +89,27 @@ public static class ConferenceTelecom
         }
     }
 
-    /// <summary>Clears the in-flight/active gate (disconnect, abort, or PlaceCall failure).</summary>
+    /// <summary>No-op gate clear (kept for ConnectionService disconnect path).</summary>
     public static void ClearCallGate()
     {
-        lock (Gate)
-            _placeCallInFlightOrActive = false;
     }
 
-    /// <summary>Called from ConnectionService when Telecom rejects the outgoing request.</summary>
+    /// <summary>Called if a Connection was somehow requested and Telecom rejected it.</summary>
     public static void NotifyPlaceCallFailed(ILogger? logger = null)
     {
         logger ??= NullLogger.Instance;
-        ClearCallGate();
-        logger.LogWarning("Telecom PlaceCall failed; will retry on next sync");
-    }
-
-    private static void PlaceCallIfNeeded(Context context, ILogger logger)
-    {
-        // Live connection already held — just mark ourselves in sync.
-        if (ConferenceConnection.Current is not null)
-        {
-            _placeCallInFlightOrActive = true;
-            return;
-        }
-
-        // PlaceCall already issued; ConnectionService has not answered yet.
-        // A second PlaceCall shows: "already another call connecting".
-        if (_placeCallInFlightOrActive)
-            return;
-
-        var telecom = context.GetSystemService(Context.TelecomService) as TelecomManager;
-        if (telecom is null)
-            return;
-
-        var handle = CreateHandle(context);
-        var extras = new Bundle();
-        extras.PutParcelable(TelecomManager.ExtraPhoneAccountHandle, handle);
-        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(26))
-            extras.PutBoolean(TelecomManager.ExtraStartCallWithSpeakerphone, false);
-
-        // Namespace AlcoRats.Android shadows Android — use global:: for Uri.
-        var address = global::Android.Net.Uri.FromParts("sip", "alcorats", null);
-        _placeCallInFlightOrActive = true;
-        try
-        {
-            telecom.PlaceCall(address, extras);
-            logger.LogInformation("Telecom self-managed call placed");
-        }
-        catch (Exception)
-        {
-            _placeCallInFlightOrActive = false;
-            throw;
-        }
+        logger.LogWarning("Telecom PlaceCall failed (unexpected — we no longer place calls)");
     }
 
     private static void EndCallIfNeeded(ILogger logger)
     {
-        var connection = ConferenceConnection.Current;
-        if (connection is not null)
+        IsEndingCall = true;
+        try
         {
+            var connection = ConferenceConnection.Current;
+            if (connection is null)
+                return;
+
             try
             {
                 connection.SetDisconnected(new DisconnectCause(Causes.Local));
@@ -160,7 +122,9 @@ public static class ConferenceTelecom
 
             ConferenceConnection.Current = null;
         }
-
-        _placeCallInFlightOrActive = false;
+        finally
+        {
+            IsEndingCall = false;
+        }
     }
 }

@@ -109,7 +109,26 @@ public sealed class GlobalExceptionHandler
     {
         _logger.LogError(e.Exception, "Unhandled UI exception");
         e.Handled = true;
+
+        // Avalonia DevTools cannot reach the desktop host from an Android emulator.
+        if (IsIgnorableDevToolsException(e.Exception))
+            return;
+
         PresentFatal(e.Exception.ToString(), block: false);
+    }
+
+    private static bool IsIgnorableDevToolsException(Exception exception)
+    {
+        for (var ex = exception; ex is not null; ex = ex.InnerException)
+        {
+            var name = ex.GetType().FullName ?? ex.GetType().Name;
+            if (name.IndexOf("DevToolsUnreachable", StringComparison.Ordinal) >= 0
+                || name.IndexOf("DiagnosticsSupport", StringComparison.Ordinal) >= 0
+                   && ex.Message.IndexOf("unreachable", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        return false;
     }
 
     private void PresentFatal(string message, bool block)

@@ -243,6 +243,19 @@ public class MainActivity : AvaloniaMainActivity
             && IsPlayPauseKey(e)
             && !e.IsCanceled)
         {
+            // Toggle mic in-process — do NOT StartForegroundService here.
+            // That path re-ran AcquireKeepAlive/PlaceCall and caused a brief audio drop
+            // instead of a clean mute toggle (especially with Telecom + headset hook).
+            _conference ??= AppHost.IsInitialized
+                ? AppHost.Services.GetService<IConferenceSession>()
+                : null;
+            if (_conference?.State.IsActive == true)
+            {
+                HotkeyDiag.ToggleMicFrom("MainActivity key=" + e.KeyCode, this);
+                return true;
+            }
+
+            HotkeyDiag.Note("MainActivity → RequestToggleMicrophone (inactive UI)");
             ConferenceMediaSessionService.RequestToggleMicrophone(this);
             return true;
         }

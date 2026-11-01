@@ -132,22 +132,34 @@ public sealed class ConferenceMediaSessionService : Service
 
     public override StartCommandResult OnStartCommand(Intent? intent, StartCommandFlags flags, int startId)
     {
-        MediaButtonReceiver.HandleIntent(_session, intent);
+        // Only route true MEDIA_BUTTON intents — our ActionToggleMic must not go through
+        // MediaButtonReceiver (avoids Pause/Stop side-effects that duck call audio).
+        if (intent?.Action == Intent.ActionMediaButton)
+            MediaButtonReceiver.HandleIntent(_session, intent);
+
         _conference ??= ResolveConferenceSession();
 
+        var lightweight = false;
         switch (intent?.Action)
         {
             case ActionToggleMic:
                 TryToggleMicrophone();
+                lightweight = true;
                 break;
             case ActionToggleCam:
                 TryToggleCamera();
+                lightweight = true;
                 break;
             case ActionOpenChat:
                 TryOpenChat();
+                lightweight = true;
                 break;
             case ActionAudioRoute:
                 OpenAudioRoutePicker();
+                lightweight = true;
+                break;
+            case ActionRefresh:
+                lightweight = true;
                 break;
             case ActionLeave:
                 ClearPending(mic: true, cam: true);
@@ -168,7 +180,10 @@ public sealed class ConferenceMediaSessionService : Service
             return StartCommandResult.NotSticky;
         }
 
-        AcquireKeepAlive(state);
+        // Mic/cam/chat: never re-enter AcquireKeepAlive (PlaceCall) — that drops audio briefly.
+        if (!lightweight)
+            AcquireKeepAlive(state);
+
         PublishForeground(state);
         if (_session is not null)
             _session.Active = true;
@@ -838,8 +853,16 @@ public sealed class ConferenceMediaSessionService : Service
         return new Color(Color.ParseColor(night ? "#E8E8ED" : "#1C1B1F"));
     }
 
-    private static void PlayMicStatusTone(bool microphoneOn)
+    private static long _lastMicToneTicks;
+
+    /// <summary>Audible on BT SCO / InCommunication — used by shade actions and hotkeys.</summary>
+    internal static void PlayMicStatusTone(bool microphoneOn)
     {
+        var now = System.Environment.TickCount64;
+        if (now - Interlocked.Read(ref _lastMicToneTicks) < 400)
+            return;
+        Interlocked.Exchange(ref _lastMicToneTicks, now);
+
         _ = Task.Run(() =>
         {
             try
@@ -847,9 +870,9 @@ public sealed class ConferenceMediaSessionService : Service
                 // Octave leap — on/off pairs are clearly distinct (was a tight major third).
                 var firstHz = microphoneOn ? 523.25 : 1046.50; // C5 → C6 up, C6 → C5 down
                 var secondHz = microphoneOn ? 1046.50 : 523.25;
-                PlayTone(firstHz, 85);
+                PlayTone(firstHz, 85, routeWithCallAudio: true);
                 Thread.Sleep(55);
-                PlayTone(secondHz, 110);
+                PlayTone(secondHz, 110, routeWithCallAudio: true);
             }
             catch
             {
@@ -865,7 +888,7 @@ public sealed class ConferenceMediaSessionService : Service
             try
             {
                 // ~250 ms major arpeggio (E4–G#4–B4–E5) with soft harmonics.
-                PlayPcm(BuildIncomingMessageMelody(durationMs: 250));
+                PlayPcm(BuildIncomingMessageMelody(durationMs: 250), routeWithCallAudio: false);
             }
             catch
             {
@@ -925,7 +948,7 @@ public sealed class ConferenceMediaSessionService : Service
         return samples;
     }
 
-    private static void PlayTone(double frequencyHz, int durationMs)
+    private static void PlayTone(double frequencyHz, int durationMs, bool routeWithCallAudio)
     {
         const int sampleRate = 22050;
         var sampleCount = Math.Max(1, sampleRate * durationMs / 1000);
@@ -945,10 +968,10 @@ public sealed class ConferenceMediaSessionService : Service
             samples[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
         }
 
-        PlayPcm(samples);
+        PlayPcm(samples, routeWithCallAudio);
     }
 
-    private static void PlayPcm(short[] samples)
+    private static void PlayPcm(short[] samples, bool routeWithCallAudio)
     {
         // Serialize tones — overlapping Static AudioTracks are often dropped mid-call.
         lock (ToneLock)
@@ -956,12 +979,20 @@ public sealed class ConferenceMediaSessionService : Service
             const int sampleRate = 22050;
             var durationMs = Math.Max(1, samples.Length * 1000 / sampleRate);
 
-            using var track = new AudioTrack.Builder()
-                .SetAudioAttributes(new AudioAttributes.Builder()!
-                    // In-call signalling survives WebRTC audio focus better than Notification*.
+            // Mic feedback must ride the call path (BT SCO). AssistanceSonification is
+            // often silent on the headset while MODE_IN_COMMUNICATION + SCO is active.
+            var attrs = routeWithCallAudio
+                ? new AudioAttributes.Builder()!
                     .SetUsage(AudioUsageKind.VoiceCommunicationSignalling)!
                     .SetContentType(AudioContentType.Sonification)!
-                    .Build()!)!
+                    .Build()!
+                : new AudioAttributes.Builder()!
+                    .SetUsage(AudioUsageKind.AssistanceSonification)!
+                    .SetContentType(AudioContentType.Sonification)!
+                    .Build()!;
+
+            using var track = new AudioTrack.Builder()
+                .SetAudioAttributes(attrs)!
                 .SetAudioFormat(new AudioFormat.Builder()!
                     .SetEncoding(Encoding.Pcm16bit)!
                     .SetSampleRate(sampleRate)!
@@ -970,6 +1001,22 @@ public sealed class ConferenceMediaSessionService : Service
                 .SetBufferSizeInBytes(samples.Length * sizeof(short))!
                 .SetTransferMode(AudioTrackMode.Static)!
                 .Build()!;
+
+            if (routeWithCallAudio && global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
+            {
+                try
+                {
+                    var am = global::Android.App.Application.Context?
+                        .GetSystemService(Context.AudioService) as AudioManager;
+                    var device = am?.CommunicationDevice;
+                    if (device is not null)
+                        track.SetPreferredDevice(device);
+                }
+                catch
+                {
+                    // Best-effort route to current communication device.
+                }
+            }
 
             track.SetVolume(1f);
             track.Write(samples, 0, samples.Length);
@@ -1042,17 +1089,17 @@ public sealed class ConferenceMediaSessionService : Service
 
     private sealed class MediaSessionCallback(ConferenceMediaSessionService service) : MediaSessionCompat.Callback
     {
-        public override void OnPlay() => Toggle();
+        public override void OnPlay() => ToggleMicKeepPlaying();
 
-        public override void OnPause() => Toggle();
+        public override void OnPause() => ToggleMicKeepPlaying();
 
-        public override void OnStop() => Toggle();
+        public override void OnStop() => ToggleMicKeepPlaying();
 
         public override bool OnMediaButtonEvent(Intent? mediaButtonEvent)
         {
             var keyEvent = ExtractKeyEvent(mediaButtonEvent);
             if (keyEvent is null)
-                return base.OnMediaButtonEvent(mediaButtonEvent);
+                return true; // consume — don't let default Pause duck WebRTC audio
 
             if (keyEvent.Action == KeyEventActions.Down
                 && keyEvent.KeyCode is Keycode.MediaPlayPause
@@ -1060,18 +1107,23 @@ public sealed class ConferenceMediaSessionService : Service
                     or Keycode.MediaPlay
                     or Keycode.MediaPause)
             {
-                Toggle();
+                ToggleMicKeepPlaying();
                 return true;
             }
 
-            return base.OnMediaButtonEvent(mediaButtonEvent);
+            return true;
         }
 
-        private void Toggle()
+        private void ToggleMicKeepPlaying()
         {
             service.MainHandler.Post(() =>
             {
-                if (service.TryToggleMicrophone())
+                HotkeyDiag.ToggleMicFrom("MediaSession.Callback", service);
+                // VoIP session must stay "playing" — Pause/Stop would duck/stop call audio.
+                if (service._session is not null)
+                    service._session.Active = true;
+                service.UpdatePlaybackState(PlaybackStateCompat.StatePlaying);
+                if (service._lastState.IsActive)
                     service.PublishForeground(service._lastState);
             });
         }

@@ -25,9 +25,6 @@ public partial class App : Application
         CultureInfo.CurrentUICulture = ru;
 
         AvaloniaXamlLoader.Load(this);
-#if DEBUG
-        this.AttachDeveloperTools();
-#endif
     }
 
     private MainView CreateMainView()
@@ -79,6 +76,21 @@ public partial class App : Application
         // Skip TTS/background work in the designer preview process.
         if (!Design.IsDesignMode)
             AppHost.StartRuntime();
+
+#if DEBUG
+        // Desktop only — on Android the DevTools host is unreachable and throws on GoLive.
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime)
+        {
+            try
+            {
+                this.AttachDeveloperTools();
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Avalonia Developer Tools not attached");
+            }
+        }
+#endif
 
         base.OnFrameworkInitializationCompleted();
     }

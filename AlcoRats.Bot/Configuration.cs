@@ -5,7 +5,7 @@ namespace AlcoRats.Bot;
 
 public class Configuration
 {
-    public string Token { get; set; } = "";
+    public string Token { get; set; } = "8886065444:AAHfjPtV7cZqQYm9AhiwTeHMYgoAlbjyxo4";
 
     public string TelegramBotName { get; set; } = "@alcoratsbot";
 
@@ -43,6 +43,11 @@ public class Configuration
     /// When false, a no-op <c>IDomSnapshotStore</c> is registered.
     /// </summary>
     public bool SaveDomSnapshots { get; set; } = false;
+
+    /// <summary>
+    /// Jits Room Password
+    /// </summary>
+    public string RoomPassword { get; set; } = "1992";
 
     /// <summary>
     /// Piper voice id: dmitri | irina | denis | ruslan. Default: dmitri (bundled archive in Speech/).
@@ -131,6 +136,8 @@ public class Configuration
             config.JitsiUserLogin = Env("JitsiUserLogin");
         if (!string.IsNullOrWhiteSpace(Env("JitsiUserPassword")))
             config.JitsiUserPassword = Env("JitsiUserPassword");
+        if (!string.IsNullOrWhiteSpace(Env("RoomPassword")))
+            config.RoomPassword = Env("RoomPassword");
         if (!string.IsNullOrWhiteSpace(Env("BotName")))
             config.BotName = Env("BotName");
         if (!string.IsNullOrWhiteSpace(Env("PiperVoice")))

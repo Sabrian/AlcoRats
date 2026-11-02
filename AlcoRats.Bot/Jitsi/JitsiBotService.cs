@@ -53,6 +53,8 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
     private readonly Dictionary<string, string> _knownParticipants = new(StringComparer.Ordinal);
     private bool _participantsBaselineReady;
 
+    private DateTime _lastRoomPasswordMissLogUtc = DateTime.MinValue;
+
     public JitsiBotService(
         Configuration configuration,
         ILogger<JitsiBotService> logger,
@@ -775,11 +777,16 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                             Sender = string.IsNullOrWhiteSpace(message.Sender) ? "Unknown" : message.Sender.Trim(),
                             Timestamp = timestamp,
                             IsLocal = message.Local,
+                            IsPrivate = message.Private,
+                            Recipient = string.IsNullOrWhiteSpace(message.Recipient)
+                                ? null
+                                : message.Recipient.Trim(),
                         };
 
                         _logger.LogInformation(
-                            "Jitsi chat message from {Sender}: {Text}",
+                            "Jitsi chat message from {Sender}{Private}: {Text}",
                             chatMessage.Sender,
+                            chatMessage.IsPrivate ? " (private)" : "",
                             chatMessage.Text);
 
                         try
@@ -1244,6 +1251,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         await Task.Delay(1500, cancellationToken);
         await _domSnapshots.SaveAsync(page, "02-prejoin", cancellationToken);
 
+        // Locked-room password dialog can appear before Join.
+        await TryEnterRoomPasswordAsync(page, cancellationToken);
+
         // Login dialog may appear before or after the prejoin Join click.
         await SignInAsAccountAsync(page, requireDialog: false, timeout: TimeSpan.FromSeconds(15), cancellationToken);
         await _domSnapshots.SaveAsync(page, "03-after-auth-soft", cancellationToken);
@@ -1273,10 +1283,14 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         await Task.Delay(1000, cancellationToken);
         await _domSnapshots.SaveAsync(page, "04-after-join-click", cancellationToken);
 
+        // Password required often appears right after Join on locked rooms.
+        await TryEnterRoomPasswordAsync(page, cancellationToken);
+
         // Secure Domain login often appears only after Join.
         await SignInAsAccountAsync(page, requireDialog: true, timeout: TimeSpan.FromSeconds(45), cancellationToken);
         await _domSnapshots.SaveAsync(page, "05-after-auth-hard", cancellationToken);
 
+        // Keep offering room password while waiting to join (dialog can reappear after auth).
         await WaitUntilJoinedAsync(page, TimeSpan.FromSeconds(45), cancellationToken);
 
         // Auth flags lag behind navigation after Secure Domain login — poll, don't fail on first miss.
@@ -1371,6 +1385,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 _logger.LogInformation("Using existing authenticated Jitsi session");
                 return;
             }
+
+            // Locked room may ask for RoomPassword while we wait for account login.
+            await TryEnterRoomPasswordAsync(page, cancellationToken);
 
             // DOM: "Waiting for a moderator… Log-in" — guest join landed in lobby;
             // force host login instead of waiting anonymously.
@@ -1847,23 +1864,39 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                 }
             }
 
+            function isRoomLockPassword(el) {
+                if (!el) return false;
+                var m = meta(el);
+                var name = String(el.name || '').toLowerCase();
+                var id = String(el.id || '').toLowerCase();
+                var testId = String(el.getAttribute('data-testid') || '').toLowerCase();
+                return name === 'lockkey' || id === 'lockkey' || id === 'passwordrequiredinput'
+                    || testId.indexOf('lobby.password') >= 0
+                    || m.indexOf('lockkey') >= 0
+                    || m.indexOf('room password') >= 0
+                    || m.indexOf('meeting password') >= 0;
+            }
+
             var userEl = document.querySelector(
                 'input#username, input#login_username, input[name="username"], input[name="user"], input[autocomplete="username"]');
             var passEl = document.querySelector(
-                'input#password, input#login_password, input[name="password"], input[type="password"], input[autocomplete="current-password"]');
+                'input#password, input#login_password, input[name="password"], input[autocomplete="current-password"]');
 
             var inputs = [];
             collectInputs(document, inputs);
 
-            if (!passEl || !visible(passEl)) {
+            // Never treat the locked-room lockKey field as Secure Domain password.
+            if (passEl && (!visible(passEl) || isRoomLockPassword(passEl)))
                 passEl = null;
+
+            if (!passEl) {
                 for (var i = 0; i < inputs.length; i++) {
                     var el = inputs[i];
                     if (!visible(el)) continue;
-                    if ((el.type || '').toLowerCase() === 'password') {
-                        passEl = el;
-                        break;
-                    }
+                    if ((el.type || '').toLowerCase() !== 'password') continue;
+                    if (isRoomLockPassword(el)) continue;
+                    passEl = el;
+                    break;
                 }
             }
 
@@ -2109,10 +2142,54 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
             cancellationToken.ThrowIfCancellationRequested();
             if (await IsJoinedAsync(page))
                 return;
+            await TryEnterRoomPasswordAsync(page, cancellationToken);
             await Task.Delay(500, cancellationToken);
         }
 
         _logger.LogWarning("Timed out waiting for APP.conference.isJoined()");
+    }
+
+    /// <summary>
+    /// Fills the locked-room password dialog / lobby password UI using <see cref="Configuration.RoomPassword"/>.
+    /// Does not touch Secure Domain account login (username+password).
+    /// </summary>
+    private async Task TryEnterRoomPasswordAsync(IPage page, CancellationToken cancellationToken)
+    {
+        var password = (_configuration.RoomPassword ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(password))
+            return;
+
+        try
+        {
+            var json = await EvaluateInMainWorldAsyncAsync(page, EnterRoomPasswordScript, password);
+            if (string.IsNullOrWhiteSpace(json))
+                return;
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var ok = root.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
+            var attempted = root.TryGetProperty("attempted", out var attProp) && attProp.ValueKind == JsonValueKind.True;
+            if (attempted)
+            {
+                _logger.LogInformation("Room password submit: {Result}", json);
+                await _domSnapshots.SaveAsync(page, "04c-room-password", cancellationToken);
+                await Task.Delay(800, cancellationToken);
+            }
+            else if (!ok)
+            {
+                // Polled often during join — don't spam; at most once per 30s.
+                var now = DateTime.UtcNow;
+                if (now - _lastRoomPasswordMissLogUtc >= TimeSpan.FromSeconds(30))
+                {
+                    _lastRoomPasswordMissLogUtc = now;
+                    _logger.LogDebug("Room password UI not shown yet (polling)");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "TryEnterRoomPasswordAsync skipped");
+        }
     }
 
     private async Task<bool> WaitUntilAuthenticatedAsync(
@@ -2267,6 +2344,164 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
 
         return host.Trim().TrimEnd('/');
     }
+
+    /// <summary>
+    /// async function(password) — submit locked-room password via dialog / lobby UI / conference.join.
+    /// </summary>
+    private const string EnterRoomPasswordScript =
+        """
+        async function(password) {
+            function visible(el) {
+                if (!el || !el.getBoundingClientRect) return false;
+                try {
+                    var r = el.getBoundingClientRect();
+                    if (r.width < 2 || r.height < 2) return false;
+                    var s = window.getComputedStyle(el);
+                    return !!(s && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0');
+                } catch (e) { return false; }
+            }
+            function setValue(el, value) {
+                if (!el) return;
+                el.focus();
+                var proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+                var descriptor = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+                if (descriptor && descriptor.set) descriptor.set.call(el, value);
+                else el.value = value;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            }
+            function labelOf(el) {
+                return ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')
+                    + ' ' + (el.getAttribute('data-testid') || '')).toLowerCase().replace(/\s+/g, ' ').trim();
+            }
+
+            var via = [];
+            var pwd = String(password || '');
+            if (!pwd)
+                return JSON.stringify({ ok: false, attempted: false, error: 'empty-password' });
+
+            try {
+                var body = ((document.body && (document.body.innerText || document.body.textContent)) || '').toLowerCase();
+                var passwordUiHint = body.indexOf('password required') >= 0
+                    || body.indexOf('enter password') >= 0
+                    || body.indexOf('enter the password') >= 0
+                    || body.indexOf('meeting has been locked') >= 0
+                    || body.indexOf('требуется пароль') >= 0
+                    || body.indexOf('введите пароль') >= 0
+                    || !!document.querySelector('input[name="lockKey"], #passwordRequiredInput, [data-testid="lobby.password"], [data-testid="lobby.enterPasswordButton"]');
+
+                // Lobby / prejoin: reveal password field.
+                try {
+                    var reveal = document.querySelector('[data-testid="lobby.enterPasswordButton"]');
+                    if (reveal && visible(reveal)) {
+                        reveal.click();
+                        via.push('lobby.enterPasswordButton');
+                    } else {
+                        var nodes = document.querySelectorAll('a, button, [role="button"], div[class*="button"]');
+                        for (var r = 0; r < nodes.length; r++) {
+                            if (!visible(nodes[r])) continue;
+                            var lab = labelOf(nodes[r]);
+                            if (lab.indexOf('enter password') >= 0 || lab.indexOf('ввести пароль') >= 0
+                                || lab.indexOf('meeting password') >= 0) {
+                                nodes[r].click();
+                                via.push('dom-reveal-password');
+                                break;
+                            }
+                        }
+                    }
+                } catch (eReveal) {}
+
+                var input = document.querySelector(
+                    'input[name="lockKey"], input#lockKey, #passwordRequiredInput, [data-testid="lobby.password"]');
+                if ((!input || !visible(input)) && passwordUiHint) {
+                    var candidates = document.querySelectorAll('input[type="password"], input[type="text"]');
+                    for (var c = 0; c < candidates.length; c++) {
+                        if (!visible(candidates[c])) continue;
+                        var meta = ((candidates[c].name || '') + ' ' + (candidates[c].id || '') + ' '
+                            + (candidates[c].placeholder || '') + ' '
+                            + (candidates[c].getAttribute('aria-label') || '') + ' '
+                            + (candidates[c].getAttribute('data-testid') || '')).toLowerCase();
+                        // Skip Secure Domain username dialog password (paired with username).
+                        if (meta.indexOf('username') >= 0 || meta.indexOf('login') >= 0)
+                            continue;
+                        if (meta.indexOf('lock') >= 0 || meta.indexOf('password') >= 0
+                            || meta.indexOf('парол') >= 0 || candidates[c].type === 'password') {
+                            input = candidates[c];
+                            break;
+                        }
+                    }
+                }
+
+                var submittedUi = false;
+                if (input && visible(input)) {
+                    setValue(input, pwd);
+                    via.push('filled:' + (input.name || input.id || input.getAttribute('data-testid') || 'input'));
+
+                    var submit = document.querySelector(
+                        '[data-testid="lobby.passwordJoinButton"], button[type="submit"], #login_button');
+                    if (submit && visible(submit)) {
+                        submit.click();
+                        via.push('click-submit');
+                        submittedUi = true;
+                    } else {
+                        var btns = document.querySelectorAll('button, [role="button"], div[class*="button"], input[type="submit"]');
+                        for (var b = 0; b < btns.length; b++) {
+                            if (!visible(btns[b])) continue;
+                            var bl = labelOf(btns[b]);
+                            if (bl === 'ok' || bl === 'join' || bl.indexOf('join meeting') >= 0
+                                || bl.indexOf('submit') >= 0 || bl.indexOf('продолжить') >= 0
+                                || bl.indexOf('войти') >= 0 || bl.indexOf('присоединиться') >= 0) {
+                                // Avoid Cancel.
+                                if (bl.indexOf('cancel') >= 0 || bl.indexOf('отмена') >= 0)
+                                    continue;
+                                btns[b].click();
+                                via.push('click:' + bl);
+                                submittedUi = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!submittedUi) {
+                        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+                        via.push('enter-key');
+                        submittedUi = true;
+                    }
+                }
+
+                // lib-jitsi-meet: re-join with password when PASSWORD_REQUIRED.
+                var api = false;
+                try {
+                    var app = window.APP;
+                    if (app && app.conference) {
+                        if (typeof app.conference.join === 'function') {
+                            app.conference.join(pwd);
+                            via.push('APP.conference.join');
+                            api = true;
+                        } else if (app.conference._room && typeof app.conference._room.join === 'function') {
+                            app.conference._room.join(pwd);
+                            via.push('_room.join');
+                            api = true;
+                        }
+                    }
+                } catch (eApi) {
+                    via.push('api-error:' + String(eApi && eApi.message || eApi));
+                }
+
+                var attempted = submittedUi || api || via.indexOf('lobby.enterPasswordButton') >= 0
+                    || via.indexOf('dom-reveal-password') >= 0;
+                return JSON.stringify({
+                    ok: attempted,
+                    attempted: attempted,
+                    via: via,
+                    passwordUiHint: !!passwordUiHint
+                });
+            } catch (e) {
+                return JSON.stringify({ ok: false, attempted: false, error: String(e && e.message || e) });
+            }
+        }
+        """;
 
     /// <summary>
     /// Shared JS helpers for silent virtual mic + unmute (injected into page scripts).
@@ -2572,12 +2807,23 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                             myId = String(app.conference.getMyUserId() || '');
                     } catch (eMy) {}
                     var pid = m.participantId != null ? String(m.participantId) : '';
+                    var recipient = '';
+                    try {
+                        if (m.recipient != null) {
+                            if (typeof m.recipient === 'string')
+                                recipient = m.recipient;
+                            else if (m.recipient.name || m.recipient.displayName)
+                                recipient = String(m.recipient.name || m.recipient.displayName || '');
+                        }
+                    } catch (eRec) {}
                     return {
                         id: id,
                         text: text,
                         sender: String(m.displayName || m.participantName || m.sender || m.nick || ''),
                         timestampMs: ts,
-                        local: !!(m.local || m.isLocal || (myId && pid && myId === pid))
+                        local: !!(m.local || m.isLocal || (myId && pid && myId === pid)),
+                        private: !!(m.privateMessage || m.isPrivate || m.lobbyChat),
+                        recipient: recipient
                     };
                 }
 
@@ -2626,12 +2872,15 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                                 var mid = String(ts || Date.now()) + ':' + String(id || '') + ':' + String(text || '');
                                 var myId2 = '';
                                 try { myId2 = String(conf.getMyUserId && conf.getMyUserId() || ''); } catch (e2) {}
+                                // lib-jitsi-meet messageReceived is group chat; PMs come via store ADD_MESSAGE.
                                 enqueueMapped({
                                     id: mid,
                                     text: String(text || ''),
                                     sender: String(name || id || ''),
                                     timestampMs: tsMs,
-                                    local: !!(myId2 && id && String(id) === myId2)
+                                    local: !!(myId2 && id && String(id) === myId2),
+                                    private: false,
+                                    recipient: ''
                                 });
                             } catch (eMsg) {}
                         };
@@ -2683,12 +2932,23 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
                         if (typeof m.timestamp === 'number' && m.timestamp > 0)
                             ts = m.timestamp < 1e12 ? m.timestamp * 1000 : m.timestamp;
                         var pid = m.participantId != null ? String(m.participantId) : '';
+                        var recipient = '';
+                        try {
+                            if (m.recipient != null) {
+                                if (typeof m.recipient === 'string')
+                                    recipient = m.recipient;
+                                else if (m.recipient.name || m.recipient.displayName)
+                                    recipient = String(m.recipient.name || m.recipient.displayName || '');
+                            }
+                        } catch (eRec) {}
                         result.push({
                             id: id,
                             text: text,
                             sender: String(m.displayName || m.participantName || m.sender || m.nick || ''),
                             timestampMs: ts,
-                            local: !!(m.local || m.isLocal || (myId && pid && myId === pid))
+                            local: !!(m.local || m.isLocal || (myId && pid && myId === pid)),
+                            private: !!(m.privateMessage || m.isPrivate || m.lobbyChat),
+                            recipient: recipient
                         });
                     }
                 }
@@ -2994,5 +3254,9 @@ sealed class JitsiBotService : IJitsiBotService, IAsyncDisposable
         public long? TimestampMs { get; set; }
 
         public bool Local { get; set; }
+
+        public bool Private { get; set; }
+
+        public string Recipient { get; set; }
     }
 }

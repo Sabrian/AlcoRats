@@ -54,12 +54,8 @@ class CommandProcessor : ICommandProcessor
                 }
             }
 
-            var anonce = message.Text.StartsWith("@");
-            if (anonce)
-            {
-                message.Text = message.Text[1..].Trim();
-            }
-
+            await _jitsiBot.SendMessage($"[{message.Sender}]\n{message.Text}");
+            var anonce = message.IsPrivate;
             var subscribers = _database.GetSubscribers();
             foreach (var subscriber in subscribers)
             {

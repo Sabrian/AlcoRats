@@ -72,6 +72,7 @@ public sealed class ConferenceMediaSessionService : Service
     /// </summary>
     private long _callStartedAtMs;
     private bool _isForegroundPosted;
+    private bool _preferredRouteScheduled;
     private static readonly object ToneLock = new();
     private Java.Lang.IRunnable? _clearMicPendingRunnable;
     private Java.Lang.IRunnable? _clearCamPendingRunnable;
@@ -214,6 +215,27 @@ public sealed class ConferenceMediaSessionService : Service
     {
         ConferenceWakeLock.Acquire(this);
         ConferenceTelecom.SyncWithConference(this, state);
+    }
+
+    /// <summary>
+    /// After join, SCO/headset often appears a beat after MODE_IN_COMMUNICATION.
+    /// Retry a few times while still on earpiece/speaker defaults.
+    /// </summary>
+    private void SchedulePreferHeadsetOnJoin()
+    {
+        if (_preferredRouteScheduled)
+            return;
+        _preferredRouteScheduled = true;
+
+        void TryPrefer()
+        {
+            try { ConferenceAudio.PreferHeadsetIfAvailable(this); }
+            catch { /* best-effort */ }
+        }
+
+        TryPrefer();
+        MainHandler.PostDelayed(new Java.Lang.Runnable(TryPrefer), 750);
+        MainHandler.PostDelayed(new Java.Lang.Runnable(TryPrefer), 2000);
     }
 
     private void ReleaseKeepAlive()
@@ -471,6 +493,7 @@ public sealed class ConferenceMediaSessionService : Service
         if (!state.IsActive)
         {
             _callStartedAtMs = 0;
+            _preferredRouteScheduled = false;
             ReleaseKeepAlive();
             DismissShade();
             return;
@@ -480,6 +503,7 @@ public sealed class ConferenceMediaSessionService : Service
             _callStartedAtMs = Java.Lang.JavaSystem.CurrentTimeMillis();
 
         AcquireKeepAlive(state);
+        SchedulePreferHeadsetOnJoin();
         // CallStyle must be posted via StartForeground only — NotificationManager.Notify
         // throws IllegalArgumentException on API 34+ ("must be for a foreground service").
         try

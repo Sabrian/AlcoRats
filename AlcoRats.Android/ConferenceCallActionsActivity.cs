@@ -37,14 +37,13 @@ public sealed class ConferenceCallActionsActivity : Activity
             : null;
         var muted = conference?.State.AudioMuted ?? false;
         var routes = ConferenceAudio.ListRoutes(this);
-        var currentAudio = ConferenceAudio.CurrentLabel(this);
 
         var labels = new List<string>
         {
             muted ? "Микрофон: выкл  →  включить" : "Микрофон: вкл  →  выключить"
         };
         labels.AddRange(routes.Select(r =>
-            string.Equals(r.Label, currentAudio, StringComparison.OrdinalIgnoreCase)
+            ConferenceAudio.IsCurrent(this, r)
                 ? "✓ Звук: " + r.Label
                 : "Звук: " + r.Label));
 

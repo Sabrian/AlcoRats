@@ -39,9 +39,8 @@ public sealed class AudioRoutePickerActivity : Activity
             return;
         }
 
-        var current = ConferenceAudio.CurrentLabel(this);
         var labels = routes
-            .Select(r => string.Equals(r.Label, current, StringComparison.OrdinalIgnoreCase)
+            .Select(r => ConferenceAudio.IsCurrent(this, r)
                 ? "✓ " + r.Label
                 : r.Label)
             .ToArray();

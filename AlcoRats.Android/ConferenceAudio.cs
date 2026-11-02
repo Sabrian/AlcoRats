@@ -59,6 +59,22 @@ public static class ConferenceAudio
         if (audio is null)
             return "Звук";
 
+        // Prefer the live CommunicationDevice product name (e.g. "WH-H910N") so UI
+        // checkmarks match ListRoutes labels — not a generic "Bluetooth".
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
+        {
+            try
+            {
+                var current = audio.CommunicationDevice;
+                if (current is not null)
+                    return LabelFor(current);
+            }
+            catch
+            {
+                // Fall through.
+            }
+        }
+
         // Prefer Telecom route while a self-managed call is up — CommunicationDevice often lags.
         try
         {
@@ -103,12 +119,22 @@ public static class ConferenceAudio
         }
 
 #pragma warning disable CS0618
-        // SpeakerphoneOn is more trustworthy than a stale CommunicationDevice=earpiece.
         if (audio.SpeakerphoneOn)
             return "Громкая связь";
         if (audio.BluetoothScoOn)
             return "Bluetooth";
+        if (audio.WiredHeadsetOn)
+            return "Гарнитура";
 #pragma warning restore CS0618
+        return "Трубка";
+    }
+
+    /// <summary>True if <paramref name="option"/> is the active communication route.</summary>
+    public static bool IsCurrent(Context context, RouteOption option)
+    {
+        var audio = GetAudioManager(context);
+        if (audio is null)
+            return false;
 
         if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
         {
@@ -116,7 +142,48 @@ public static class ConferenceAudio
             {
                 var current = audio.CommunicationDevice;
                 if (current is not null)
-                    return LabelFor(current);
+                {
+                    if (option.Device is not null
+                        && current.Id == option.Device.Id
+                        && current.Type == option.Device.Type)
+                        return true;
+
+                    // Built-in routes are unique by kind.
+                    if (option.Kind is RouteKind.Earpiece or RouteKind.Speaker
+                        && KindFor(current) == option.Kind)
+                        return true;
+
+                    // BT/wired: match kind when product label also matches (or no device id).
+                    if (KindFor(current) == option.Kind
+                        && (option.Device is null
+                            || string.Equals(LabelFor(current), option.Label, StringComparison.OrdinalIgnoreCase)))
+                        return true;
+
+                    return false;
+                }
+            }
+            catch
+            {
+                // Fall through.
+            }
+        }
+
+        return CurrentKind(context) == option.Kind;
+    }
+
+    public static RouteKind CurrentKind(Context context)
+    {
+        var audio = GetAudioManager(context);
+        if (audio is null)
+            return RouteKind.Earpiece;
+
+        if (global::System.OperatingSystem.IsAndroidVersionAtLeast(31))
+        {
+            try
+            {
+                var current = audio.CommunicationDevice;
+                if (current is not null)
+                    return KindFor(current);
             }
             catch
             {
@@ -125,10 +192,38 @@ public static class ConferenceAudio
         }
 
 #pragma warning disable CS0618
+        if (audio.SpeakerphoneOn)
+            return RouteKind.Speaker;
+        if (audio.BluetoothScoOn)
+            return RouteKind.Bluetooth;
         if (audio.WiredHeadsetOn)
-            return "Гарнитура";
+            return RouteKind.Wired;
 #pragma warning restore CS0618
-        return "Трубка";
+        return RouteKind.Earpiece;
+    }
+
+    /// <summary>
+    /// On join: prefer Bluetooth headset, else wired/USB. No-op if already on a headset
+    /// or none is available (does not override an explicit speaker choice after the user picks it
+    /// once CurrentKind is no longer a built-in default — callers should only invoke early).
+    /// </summary>
+    public static bool PreferHeadsetIfAvailable(Context context)
+    {
+        var routes = ListRoutes(context);
+        var headset = routes.FirstOrDefault(r => r.Kind == RouteKind.Bluetooth)
+                      ?? routes.FirstOrDefault(r => r.Kind is RouteKind.Wired or RouteKind.Usb);
+        if (headset is null)
+            return false;
+
+        if (IsCurrent(context, headset))
+            return true;
+
+        var kind = CurrentKind(context);
+        // Only auto-switch away from phone defaults — never yank off another headset.
+        if (kind is not (RouteKind.Earpiece or RouteKind.Speaker or RouteKind.Other))
+            return false;
+
+        return SelectDetailed(context, headset, showToast: false).Ok;
     }
 
     public static bool Select(Context context, RouteOption option)

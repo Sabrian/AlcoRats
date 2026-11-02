@@ -4,8 +4,8 @@
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <RootNamespace>AlcoRats</RootNamespace>
-    <Version>1.0.0-rc.1</Version>
-    <InformationalVersion>1.0.0-rc.1</InformationalVersion>
+    <Version>1.0.1</Version>
+    <InformationalVersion>1.0.1</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
